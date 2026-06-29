@@ -153,13 +153,12 @@ void menuXCtrl() {
 
       if (readButton(btnPlus) || readButton(btnMinus)) { forward = !forward; redraw = true; }
       if (readButton(btnEnter)) {
-        long steps = lround_double(distanceMM * STEPS_PER_MM_X);
-        if (steps > 0) {
+        if (distanceMM > 0) {
           digitalWrite(PIN_EN, LOW);
           bool none[4] = {false,false,false,false};
           String rt = String("Move ") + (forward ? "+" : "-") + String(distanceMM,1) + "mm";
           drawStatusRow(none, rt);
-          stepN(steps, forward);
+          xMoveMM(distanceMM, forward);
           digitalWrite(PIN_EN, HIGH);
         }
         oledHeader("X Ctrl");

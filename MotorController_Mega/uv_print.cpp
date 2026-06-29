@@ -84,10 +84,19 @@ void moveZStepsRelative(long deltaSteps) {
   if (deltaSteps == 0) return;
   bool dir = deltaSteps > 0;
   long steps = abs(deltaSteps);
+  digitalWrite(PIN_Z_DIR, dir ? HIGH : LOW);
+  delayMicroseconds(5); // Setup time for DIR pin
+  
+  // Z-axis lead screws need to run slower than X/Y belts to avoid stalling.
+  int zDelay = max(1000, STEP_PERIOD_US * 4);
+  
   for (long i = 0; i < steps; ++i) {
     if (emergencyStopTriggered && !zHomingActive) handleEmergencyStop();
-    zPulse(dir);
-    delayMicroseconds(1000);
+    digitalWrite(PIN_Z_STEP, HIGH);
+    delayMicroseconds(STEP_PULSE_US);
+    digitalWrite(PIN_Z_STEP, LOW);
+    currentStepsZ += dir ? 1 : -1;
+    delayMicroseconds(zDelay);
   }
 }
 
@@ -106,22 +115,36 @@ void moveZSteps(long targetStepsZ) {
   if (delta == 0) return;
   bool dir = delta > 0;
   long steps = abs(delta);
+  digitalWrite(PIN_Z_DIR, dir ? HIGH : LOW);
+  delayMicroseconds(5);
+  
+  int zDelay = max(1000, STEP_PERIOD_US * 4);
+  
   for (long i = 0; i < steps; ++i) {
-    zPulse(dir);
-    delayMicroseconds(1000);
+    digitalWrite(PIN_Z_STEP, HIGH);
+    delayMicroseconds(STEP_PULSE_US);
+    digitalWrite(PIN_Z_STEP, LOW);
+    currentStepsZ += dir ? 1 : -1;
+    delayMicroseconds(zDelay);
   }
 }
 
 void homeZ() {
   zHomingActive = true;
+  int zDelay = max(1000, STEP_PERIOD_US * 4);
 
+  digitalWrite(PIN_Z_DIR, LOW);
+  delayMicroseconds(5);
   while (!isZMaxSwitchPressed()) {
     if (emergencyStopTriggered) {
       zHomingActive = false;
       handleEmergencyStop();
     }
-    zPulse(false);
-    delayMicroseconds(1000);
+    digitalWrite(PIN_Z_STEP, HIGH);
+    delayMicroseconds(STEP_PULSE_US);
+    digitalWrite(PIN_Z_STEP, LOW);
+    currentStepsZ -= 1;
+    delayMicroseconds(zDelay);
   }
 
   currentStepsZ = 0;
@@ -130,13 +153,19 @@ void homeZ() {
   moveZStepsRelative(approachSteps);
 
   deployProbe();
+  
+  digitalWrite(PIN_Z_DIR, HIGH);
+  delayMicroseconds(5);
   while (!isProbeTriggered()) {
     if (emergencyStopTriggered) {
       zHomingActive = false;
       handleEmergencyStop();
     }
-    zPulse(true);
-    delayMicroseconds(1000);
+    digitalWrite(PIN_Z_STEP, HIGH);
+    delayMicroseconds(STEP_PULSE_US);
+    digitalWrite(PIN_Z_STEP, LOW);
+    currentStepsZ += 1;
+    delayMicroseconds(zDelay);
   }
 
   currentStepsZ = 0;
@@ -166,22 +195,37 @@ float getInterpolatedZ(float x_mm, float y_mm) {
 }
 
 void zPulse(bool dir) {
-  digitalWrite(PIN_Z_DIR, dir ? HIGH : LOW); digitalWrite(PIN_Z_STEP, HIGH);
-  delayMicroseconds(STEP_PULSE_US); digitalWrite(PIN_Z_STEP, LOW);
+  digitalWrite(PIN_Z_DIR, dir ? HIGH : LOW); 
+  delayMicroseconds(2);
+  digitalWrite(PIN_Z_STEP, HIGH);
+  delayMicroseconds(STEP_PULSE_US); 
+  digitalWrite(PIN_Z_STEP, LOW);
   currentStepsZ += dir ? 1 : -1;
 }
 
 float probeZ() {
   deployProbe();
+  int zDelay = max(1000, STEP_PERIOD_US * 4);
+  digitalWrite(PIN_Z_DIR, HIGH);
+  delayMicroseconds(5);
   while (!isProbeTriggered()) {
-    zPulse(true);
-    delayMicroseconds(2000);
+    digitalWrite(PIN_Z_STEP, HIGH);
+    delayMicroseconds(STEP_PULSE_US);
+    digitalWrite(PIN_Z_STEP, LOW);
+    currentStepsZ += 1;
+    delayMicroseconds(zDelay);
   }
   float trigger_height = currentStepsZ / STEPS_PER_MM_Z;
   stowProbe();
+  
+  digitalWrite(PIN_Z_DIR, LOW);
+  delayMicroseconds(5);
   for (int i = 0; i < (2.0f * STEPS_PER_MM_Z); i++) {
-    zPulse(false);
-    delayMicroseconds(1000);
+    digitalWrite(PIN_Z_STEP, HIGH);
+    delayMicroseconds(STEP_PULSE_US);
+    digitalWrite(PIN_Z_STEP, LOW);
+    currentStepsZ -= 1;
+    delayMicroseconds(zDelay);
   }
   return trigger_height;
 }
@@ -243,21 +287,65 @@ float lutExposureFromByte(uint8_t v) {
   return LUT16[idx] + t*(LUT16[idx+1] - LUT16[idx]);
 }
 
-void moveToSteps(long target) { long d = target - currentSteps; if (d) stepN(labs(d), d > 0); }
+void moveToSteps(long target) { 
+  long d = target - currentSteps; 
+  if (d) {
+    int oldPeriod = STEP_PERIOD_US;
+    STEP_PERIOD_US = max(STEP_PULSE_US + 10, oldPeriod / 4);
+    stepN(labs(d), d > 0); 
+    STEP_PERIOD_US = oldPeriod;
+  }
+}
+
 void moveToPixel(long p) { moveToSteps(p * (long)STEPS_PER_PIXEL); }
-void yMoveMM(float mm, bool forward) { long s = lround_double(mm * STEPS_PER_MM_Y); yStepPair(s, s, forward); }
+
+void yMoveMM(float mm, bool forward) { 
+  long s = lround_double(mm * STEPS_PER_MM_Y); 
+  int oldPeriod = STEP_PERIOD_US;
+  STEP_PERIOD_US = max(STEP_PULSE_US + 10, oldPeriod / 4);
+  yStepPair(s, s, forward); 
+  STEP_PERIOD_US = oldPeriod;
+}
 
 void yMoveSkewMM(float baseMM, float deltaRightMM, bool forward) {
   long sL = lround_double(baseMM * STEPS_PER_MM_Y);
   long sR = lround_double((baseMM + deltaRightMM) * STEPS_PER_MM_Y);
   if (sR < 0) sR = 0;
+  int oldPeriod = STEP_PERIOD_US;
+  STEP_PERIOD_US = max(STEP_PULSE_US + 10, oldPeriod / 4);
   yStepPair(sL, sR, forward);
+  STEP_PERIOD_US = oldPeriod;
 }
 
-void xMoveMM(float mm, bool right) { long s = lround_double(mm * STEPS_PER_MM_X); stepN(s, right); }
-void zMoveMM(float mm, bool down) { long s = lround_double(mm * STEPS_PER_MM_Z); if (s == 0) return; moveZStepsRelative(down ? s : -s); }
+void xMoveMM(float mm, bool right) { 
+  long s = lround_double(mm * STEPS_PER_MM_X); 
+  int oldPeriod = STEP_PERIOD_US;
+  STEP_PERIOD_US = max(STEP_PULSE_US + 10, oldPeriod / 4);
+  stepN(s, right); 
+  STEP_PERIOD_US = oldPeriod;
+}
+
+void zMoveMM(float mm, bool down) { 
+  long s = lround_double(mm * STEPS_PER_MM_Z); 
+  if (s == 0) return; 
+  moveZStepsRelative(down ? s : -s); 
+}
 
 // ---------- BMP Parsing Logic ----------
+
+/**
+ * @brief Reads the first 4 visual rows of a BMP image file into an Image4x buffer.
+ * 
+ * Opens a BMP file from the SD card, parses the file and info headers to validate 
+ * the format (supports uncompressed 8-bit grayscale and 24-bit RGB), and extracts 
+ * the first 4 visual rows. Automatically handles bottom-up and top-down BMP row 
+ * orientations and converts 24-bit RGB data into 8-bit grayscale on the fly.
+ * 
+ * @param path The absolute path to the BMP file on the SD card.
+ * @param img  Reference to an Image4x struct where the extracted width and pixel 
+ *             row data will be stored.
+ * @return true if the file was successfully read and parsed, false otherwise.
+ */
 bool readFirst4RowsBMP(const String &path, Image4x &img) {
   img.width = 0;
   for (int r = 0; r < 4; r++)
@@ -371,6 +459,21 @@ bool readFourRowsAt(const String &path, const BMPMeta &m, int visualStart, Image
   return true;
 }
 
+/**
+ * @brief Reads a rolling window of 4 visual rows from a BMP file into an Image4x buffer.
+ * 
+ * Unlike readFourRowsAt (which reads forward starting from visualStart), this function 
+ * reads 4 rows *ending* at visualStart (specifically rows: visualStart-3, visualStart-2, 
+ * visualStart-1, and visualStart). This is used for staggered/interlaced printing passes
+ * where physical printhead LEDs are offset by rows. Any row indices that fall below 0 
+ * are left as blank (0). Automatically converts 24-bit RGB data into 8-bit grayscale.
+ * 
+ * @param path        The absolute path to the BMP file on the SD card.
+ * @param m           Pre-loaded BMP metadata (dimensions, stride, orientation).
+ * @param visualStart The visual row index corresponding to the final row in the 4-row window.
+ * @param img         Reference to an Image4x struct where the extracted pixel data is stored.
+ * @return true if the file was successfully read and parsed, false on file/read errors.
+ */
 bool readFourRowsBy(const String &path, const BMPMeta &m, int visualStart, Image4x &img) {
   img.width = min(MAX_IMG_WIDTH, m.W);
   for (int r = 0; r < 4; r++)
@@ -423,6 +526,16 @@ void countdown_1s_tenths(const char* label) {
 }
 
 // ---------- Print Execution ----------
+
+/**
+ * @brief Prints a BMP image by processing it in non-overlapping horizontal bands (4 rows per band).
+ * 
+ * Displays a UI prompt to start, then iterates through the image in slices of 4 rows.
+ * The printhead moves in a serpentine pattern (alternating left-to-right and right-to-left)
+ * to save travel time. After each band, the Y-axis advances by the configured band width.
+ * 
+ * @param path The absolute path to the BMP file on the SD card.
+ */
 void printEntireBMP(const String &path) {
   BMPMeta meta;
   if (!loadBMPMeta(path, meta)) {
@@ -471,6 +584,17 @@ void printEntireBMP(const String &path) {
       bool none[4] = {false,false,false,false};
       char buf[24];
       snprintf(buf, sizeof(buf), "Y +%.2fmm", CFG.yBandAdvanceMM);
+
+/**
+ * @brief Prints a BMP image using an interlaced/staggered approach, advancing one row at a time.
+ * 
+ * Unlike the banded approach, this function advances the Y-axis by exactly one pixel (CFG.mmPerPixel)
+ * after each X-axis pass. It uses a rolling window of 4 rows to accommodate the physical staggered 
+ * layout of the UV LEDs. Each physical pixel receives 1/4th of its required exposure per pass, 
+ * totaling full exposure over 4 passes. Includes visual debugging checkpoints on the OLED.
+ * 
+ * @param path The absolute path to the BMP file on the SD card.
+ */
       drawStatusRow(none, String(buf));
       yMoveMM(CFG.yBandAdvanceMM, true);
     }
@@ -555,9 +679,7 @@ void printEntireBMP_4by(const String &path) {
       char buf[24];
       snprintf(buf, sizeof(buf), "Y +%.2fmm", CFG.mmPerPixel);
       drawStatusRow(none, String(buf));
-      yMoveMM(CFG.mmPerPixel, true);
-    }
-  }
+   Core Serpentine Print Pass Logic
 
   oledHeader("Print");
   display.setCursor(0, 22); display.print("Entire image done.");
@@ -565,10 +687,20 @@ void printEntireBMP_4by(const String &path) {
   delay(3000);
 }
 
-// ---------------------------------------------------------
-// PLACEHOLDER: This function was called in your code but 
-// missing from the raw text provided. Fill in your logic!
-// ---------------------------------------------------------
+/**
+ * @brief Executes the physical movements and UV exposures for a single X-axis pass.
+ * 
+ * Moves the printhead pixel-by-pixel along the X-axis. At each pixel, calculates the 
+ * appropriate exposure duration for each of the 4 LEDs based on their physical X-offsets.
+ * The exposure values are looked up via a LUT, optionally inverted, scaled down if 
+ * interlaced printing is active (byRow), and sent to the Nano printhead via serial. 
+ * The function waits for the Nano to finish exposing before stepping to the next pixel.
+ * 
+ * @param img     The Image4x buffer containing the pixel data for the current rows.
+ * @param forward True to sweep forward (pixel 0 to end), false for reverse.
+ * @param byRow   If true, reduces exposure by a factor of 4 (used for interlaced printing).
+ */
+
 void doPrintBMPSliceSerpentine(Image4x &img, bool forward, bool byRow) {
   digitalWrite(PIN_EN, LOW);
 

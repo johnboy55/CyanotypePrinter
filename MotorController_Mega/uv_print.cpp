@@ -679,7 +679,9 @@ void printEntireBMP_4by(const String &path) {
       char buf[24];
       snprintf(buf, sizeof(buf), "Y +%.2fmm", CFG.mmPerPixel);
       drawStatusRow(none, String(buf));
-   Core Serpentine Print Pass Logic
+      yMoveMM(CFG.mmPerPixel, true);
+    }
+  }
 
   oledHeader("Print");
   display.setCursor(0, 22); display.print("Entire image done.");
@@ -704,55 +706,61 @@ void printEntireBMP_4by(const String &path) {
 void doPrintBMPSliceSerpentine(Image4x &img, bool forward, bool byRow) {
   digitalWrite(PIN_EN, LOW);
 
-  const int lastP = img.width - 1 + 3 * OFFSET_PIXELS;
+  const float mm_per_pixel = MM_PER_PIXEL; 
+  const float led_spacing = LED_SPACING_MM;
+  const float step_mm = 1.0f;
+  const long steps_per_1mm = lround_double(step_mm * STEPS_PER_MM_X);
+
+  const float max_x_mm = (img.width - 1) * mm_per_pixel + 3.0f * led_spacing;
+  const int total_steps = (int)(max_x_mm / step_mm) + 1;
+
+  if (forward) moveToSteps(0);
+  else         moveToSteps(lround_double(max_x_mm * STEPS_PER_MM_X));
+
+  int sStart = forward ? 0 : total_steps - 1;
+  int sEnd   = forward ? total_steps - 1 : 0;
+  int sStep  = forward ? 1 : -1;
+
   const float expDiv = byRow ? 0.25f : 1.0f;
 
-  if (forward) moveToPixel(0);
-  else         moveToPixel(lastP);
-
-  int pStart = forward ? 0     : lastP;
-  int pEnd   = forward ? lastP : 0;
-  int pStep  = forward ? +1    : -1;
-
-  for (int p = pStart; ; p += pStep) {
+  for (int s = sStart; ; s += sStep) {
+    float x_carriage = s * step_mm;
     uint32_t durations[4] = {0, 0, 0, 0};
     bool willFire[4] = {false, false, false, false};
     int activeCount = 0;
 
     for (int k = 0; k < 4; k++) {
-      const int t = p - k * OFFSET_PIXELS;
-      if (t >= 0 && t < img.width) {
-        uint8_t v = img.row[ ROW_FOR_LED[k] ][t];
-        if (CFG.invertImage) v = 255 - v;
-        
-        // Removed LED_SCALE reference
-        const float s = lutExposureFromByte(v) * expDiv;
-        
-        if (s > 0.0f) { 
-          // Convert seconds to microseconds for the Nano serial payload
-          durations[k] = (uint32_t)(s * 1000000.0f);
-          willFire[k] = true; 
-          ++activeCount; 
+      float x_led = x_carriage - k * led_spacing;
+      long x_led_mm = lround_double(x_led);
+      
+      // A pixel t is at t * mm_per_pixel.
+      // We check if x_led matches any t * mm_per_pixel.
+      // Since mm_per_pixel = 2.0, we check if x_led is even and >= 0.
+      if (x_led_mm >= 0 && (x_led_mm % 2 == 0)) {
+        int t = x_led_mm / 2;
+        if (t < img.width) {
+          uint8_t v = img.row[ ROW_FOR_LED[k] ][t];
+          if (CFG.invertImage) v = 255 - v;
+          const float dur_s = lutExposureFromByte(v) * expDiv;
+          if (dur_s > 0.0f) { 
+            durations[k] = (uint32_t)(dur_s * 1000000.0f);
+            willFire[k] = true; 
+            ++activeCount; 
+          }
         }
       }
     }
 
-    const String right = String("Pos ") + String(p) + "/" + String(lastP);
-
     if (activeCount > 0) {
-      // Update OLED to show which LEDs are firing
-      drawStatusRow(willFire, right);
-      
-      // Offload the timing and hardware execution to the Nano printhead
+      char buf[32];
+      snprintf(buf, sizeof(buf), "X %.1fmm", x_carriage);
+      drawStatusRow(willFire, String(buf));
       sendBatchToPrinthead(durations);
       waitForPrinthead();
-    } else {
-      bool none[4] = {false, false, false, false};
-      drawStatusRow(none, right);
     }
 
-    if (p == pEnd) break;
-    stepN(STEPS_PER_PIXEL, forward);
+    if (s == sEnd) break;
+    stepN(steps_per_1mm, forward);
   }
 
   digitalWrite(PIN_EN, HIGH);

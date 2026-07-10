@@ -51,7 +51,7 @@ void sendBatchToPrinthead(uint32_t durations[4]) {
 void waitForPrinthead() {
   bool isBusy = true;
   while (isBusy) {
-    if (emergencyStopTriggered) handleEmergencyStop();
+    if (checkEStop() || checkCancel()) return;
     PRINTHEAD_SERIAL.print("S\n");
     unsigned long timeout = millis();
     while (!PRINTHEAD_SERIAL.available() && millis() - timeout < 10) {}
@@ -67,7 +67,10 @@ bool isProbeTriggered() {
   PRINTHEAD_SERIAL.print("P\n");
   unsigned long timeout = millis();
   while (!PRINTHEAD_SERIAL.available() && millis() - timeout < 100) {
-    if (emergencyStopTriggered && !zHomingActive) handleEmergencyStop();
+    // Don't classify/query the Nano from inside this wait -- that would overlap two
+    // outstanding requests on the same UART. Just bail out; the caller's stepping loop
+    // calls checkEStop() on its next iteration, once this exchange has finished.
+    if (emergencyStopTriggered) break;
   }
   if (PRINTHEAD_SERIAL.available()) {
     String response = PRINTHEAD_SERIAL.readStringUntil('\n'); response.trim();
@@ -77,7 +80,78 @@ bool isProbeTriggered() {
 }
 
 bool isZMaxSwitchPressed() {
-  return digitalRead(PIN_Z_CONTACT) == LOW;
+  // PIN_PROBE_SIG on the Nano IS the Z limit switch (same signal isProbeTriggered() reads);
+  // there's no separate Mega-side pin for it any more, so just reuse that query.
+  return isProbeTriggered();
+}
+
+// ---------- Emergency Stop ----------
+// emergencyStopTriggered (volatile, ISR-set) is a raw, unclassified signal: the Nano ORs
+// its Z limit, Y limit, and thermal cutoff onto one line, so a rising/falling edge alone
+// doesn't say which one fired, or whether it was an *expected* touch (e.g. Z homing).
+// eStopLatched is the classified, operator-visible result: once true, all motion stops
+// until clearEmergencyStop() is called from the menu.
+static bool eStopAnnounced = false;
+
+int queryNanoLimitMask() {
+  PRINTHEAD_SERIAL.print("L\n");
+  unsigned long timeout = millis();
+  while (!PRINTHEAD_SERIAL.available() && millis() - timeout < 100) {}
+  if (PRINTHEAD_SERIAL.available()) {
+    String resp = PRINTHEAD_SERIAL.readStringUntil('\n'); resp.trim();
+    if (resp.startsWith("L:")) return resp.substring(2).toInt();
+  }
+  return -1; // Nano not responding -- never assume this means "safe".
+}
+
+static String describeEStopCause(int mask) {
+  if (mask < 0) return "NANO OFFLINE";
+  if (mask == 0) return "UNKNOWN";
+  String s;
+  if (mask & 0x1) s += "Z ";
+  if (mask & 0x2) s += "Y ";
+  if (mask & 0x4) s += "OVERTEMP ";
+  return s;
+}
+
+void handleEmergencyStop() {
+  digitalWrite(PIN_EN, HIGH); // Always keep drivers disabled while a stop condition is live.
+
+  if (eStopLatched) return; // Already latched; callers check eStopLatched/checkEStop() to abort.
+
+  int mask = queryNanoLimitMask();
+  bool zOnly = (mask == 0x1);
+  bool expectedTouch = zHomingActive && zOnly;
+
+  emergencyStopTriggered = false; // Consumed either way; classification below decides the outcome.
+
+  if (expectedTouch) return; // Intentional Z contact during homing/probing -- not a real stop.
+
+  eStopLatched = true;
+  eStopCause = describeEStopCause(mask);
+
+  if (!eStopAnnounced) {
+    eStopAnnounced = true;
+    Serial.print(F("E-STOP LATCHED: ")); Serial.println(eStopCause);
+  }
+}
+
+bool checkEStop() {
+  if (emergencyStopTriggered) handleEmergencyStop();
+  return eStopLatched;
+}
+
+void clearEmergencyStop() {
+  eStopLatched = false;
+  eStopAnnounced = false;
+  eStopCause = "";
+  emergencyStopTriggered = false;
+  digitalWrite(PIN_EN, HIGH); // Stay disabled; the next intentional move re-enables it.
+}
+
+bool checkCancel() {
+  if (readButton(btnBack)) cancelRequested = true;
+  return cancelRequested;
 }
 
 void moveZStepsRelative(long deltaSteps) {
@@ -91,7 +165,7 @@ void moveZStepsRelative(long deltaSteps) {
   int zDelay = max(1000, STEP_PERIOD_US * 4);
   
   for (long i = 0; i < steps; ++i) {
-    if (emergencyStopTriggered && !zHomingActive) handleEmergencyStop();
+    if (checkEStop() || checkCancel()) break;
     digitalWrite(PIN_Z_STEP, HIGH);
     delayMicroseconds(STEP_PULSE_US);
     digitalWrite(PIN_Z_STEP, LOW);
@@ -119,8 +193,9 @@ void moveZSteps(long targetStepsZ) {
   delayMicroseconds(5);
   
   int zDelay = max(1000, STEP_PERIOD_US * 4);
-  
+
   for (long i = 0; i < steps; ++i) {
+    if (checkEStop() || checkCancel()) break;
     digitalWrite(PIN_Z_STEP, HIGH);
     delayMicroseconds(STEP_PULSE_US);
     digitalWrite(PIN_Z_STEP, LOW);
@@ -136,10 +211,7 @@ void homeZ() {
   digitalWrite(PIN_Z_DIR, LOW);
   delayMicroseconds(5);
   while (!isZMaxSwitchPressed()) {
-    if (emergencyStopTriggered) {
-      zHomingActive = false;
-      handleEmergencyStop();
-    }
+    if (checkEStop() || checkCancel()) { zHomingActive = false; return; }
     digitalWrite(PIN_Z_STEP, HIGH);
     delayMicroseconds(STEP_PULSE_US);
     digitalWrite(PIN_Z_STEP, LOW);
@@ -151,16 +223,14 @@ void homeZ() {
 
   long approachSteps = lround_double(Z_MAX_TO_CR_TOUCH_APPROACH_MM * STEPS_PER_MM_Z);
   moveZStepsRelative(approachSteps);
+  if (eStopLatched || cancelRequested) { zHomingActive = false; return; }
 
   deployProbe();
-  
+
   digitalWrite(PIN_Z_DIR, HIGH);
   delayMicroseconds(5);
   while (!isProbeTriggered()) {
-    if (emergencyStopTriggered) {
-      zHomingActive = false;
-      handleEmergencyStop();
-    }
+    if (checkEStop() || checkCancel()) { zHomingActive = false; return; }
     digitalWrite(PIN_Z_STEP, HIGH);
     delayMicroseconds(STEP_PULSE_US);
     digitalWrite(PIN_Z_STEP, LOW);
@@ -208,19 +278,23 @@ float probeZ() {
   int zDelay = max(1000, STEP_PERIOD_US * 4);
   digitalWrite(PIN_Z_DIR, HIGH);
   delayMicroseconds(5);
+  zHomingActive = true; // The probe touch here is expected -- don't let it trip a full e-stop.
   while (!isProbeTriggered()) {
+    if (checkEStop() || checkCancel()) { zHomingActive = false; stowProbe(); return 0.0f; }
     digitalWrite(PIN_Z_STEP, HIGH);
     delayMicroseconds(STEP_PULSE_US);
     digitalWrite(PIN_Z_STEP, LOW);
     currentStepsZ += 1;
     delayMicroseconds(zDelay);
   }
+  zHomingActive = false;
   float trigger_height = currentStepsZ / STEPS_PER_MM_Z;
   stowProbe();
-  
+
   digitalWrite(PIN_Z_DIR, LOW);
   delayMicroseconds(5);
   for (int i = 0; i < (2.0f * STEPS_PER_MM_Z); i++) {
+    if (checkEStop() || checkCancel()) return trigger_height;
     digitalWrite(PIN_Z_STEP, HIGH);
     delayMicroseconds(STEP_PULSE_US);
     digitalWrite(PIN_Z_STEP, LOW);
@@ -245,7 +319,7 @@ void stepN(long n, bool dir) {
   long err = n / 2;
 
   for (long i = 0; i < n; ++i) {
-    if (emergencyStopTriggered) handleEmergencyStop();
+    if (checkEStop() || checkCancel()) break;
     stepPulseOnceX(); currentSteps += dir ? 1 : -1;
     if (mesh_active && dz > 0) { err -= dz;
       if (err < 0) { zPulse(zDir); err += n; } }
@@ -267,7 +341,7 @@ void yStepPair(long stepsL, long stepsR, bool dir) {
   long accL = 0, accR = 0;
 
   for (long i = 0; i < N; ++i) {
-    if (emergencyStopTriggered) handleEmergencyStop();
+    if (checkEStop() || checkCancel()) break;
     accL += stepsL; accR += stepsR;
     if (accL >= N) { yPulseLeft(); accL -= N; }
     if (accR >= N) { yPulseRight(); accR -= N; }
@@ -474,39 +548,87 @@ bool readFourRowsAt(const String &path, const BMPMeta &m, int visualStart, Image
  * @param img         Reference to an Image4x struct where the extracted pixel data is stored.
  * @return true if the file was successfully read and parsed, false on file/read errors.
  */
-bool readFourRowsBy(const String &path, const BMPMeta &m, int visualStart, Image4x &img) {
-  img.width = min(MAX_IMG_WIDTH, m.W);
+// ---------- Row source abstraction ----------
+// Lets the 4-pass print engine (printFromRowSource, below) pull rows from either an SD
+// BMP file or the ESP32's in-memory hex string, without buffering more than a few rows
+// at a time -- the Mega's 8KB SRAM can't hold a full print image either way.
+class RowSource {
+public:
+  int width = 0;
+  int height = 0;
+  virtual bool readRow(int row, uint8_t *out, int cols) = 0; // fills out[0..cols-1], cols <= width
+  virtual ~RowSource() {}
+};
+
+class BMPFileRowSource : public RowSource {
+  File f;
+  BMPFILEHEADER fh;
+  BMPINFOHEADER ih;
+  bool bottomUp = false;
+  int rowStride = 0;
+public:
+  bool open(const String &path) {
+    f = SD.open(path);
+    if (!f) return false;
+    if (f.read((uint8_t*)&fh, sizeof(fh)) != sizeof(fh) || fh.bfType != 0x4D42) { f.close(); return false; }
+    if (f.read((uint8_t*)&ih, sizeof(ih)) != sizeof(ih)) { f.close(); return false; }
+    if (ih.biCompression != 0 || (ih.biBitCount != 24 && ih.biBitCount != 8)) { f.close(); return false; }
+
+    bottomUp = (ih.biHeight > 0);
+    height   = abs(ih.biHeight);
+    width    = ih.biWidth;
+    const int rowBytesRaw = (ih.biBitCount * width + 7) / 8;
+    rowStride = (rowBytesRaw + 3) & ~3;
+    if (rowStride > MAX_ROWBUF) { f.close(); return false; }
+    return true;
+  }
+
+  bool readRow(int row, uint8_t *out, int cols) override {
+    if (!f) return false;
+    const int srcRow = bottomUp ? (height - 1 - row) : row;
+    const uint32_t rowOffset = fh.bfOffBits + (uint32_t)srcRow * rowStride;
+    uint8_t rowbuf[MAX_ROWBUF];
+    f.seek(rowOffset);
+    if (f.read(rowbuf, rowStride) != rowStride) return false;
+    if (ih.biBitCount == 24) {
+      for (int c = 0; c < cols; c++) {
+        const int idx = c * 3;
+        const uint8_t B = rowbuf[idx + 0], G = rowbuf[idx + 1], R = rowbuf[idx + 2];
+        out[c] = (uint8_t)(0.299f*R + 0.587f*G + 0.114f*B);
+      }
+    } else {
+      for (int c = 0; c < cols; c++) out[c] = rowbuf[c];
+    }
+    return true;
+  }
+
+  ~BMPFileRowSource() override { if (f) f.close(); }
+};
+
+class HexRowSource : public RowSource {
+  const String *hexData;
+public:
+  void init(int w, int h, const String &hex) { width = w; height = h; hexData = &hex; }
+  bool readRow(int row, uint8_t *out, int cols) override {
+    for (int c = 0; c < cols; c++) {
+      const int idx = row * width + c;
+      out[c] = (idx < (int)hexData->length()) ? (uint8_t)(hexCharToVal((*hexData)[idx]) * 17) : 0;
+    }
+    return true;
+  }
+};
+
+bool readFourRowsBy(RowSource &src, int visualStart, Image4x &img) {
+  img.width = min(MAX_IMG_WIDTH, src.width);
   for (int r = 0; r < 4; r++)
     for (int c = 0; c < MAX_IMG_WIDTH; c++)
       img.row[r][c] = 0;
-  File f = SD.open(path);
-  if (!f) return false;
-
-  uint8_t rowbuf[MAX_ROWBUF];
-  if (m.rowStride > (int)sizeof(rowbuf)) { f.close(); return false; }
 
   for (int vr = 0; vr < 4; ++vr) {
     const int visualRow = visualStart - (3 - vr);
-    if (visualRow < 0) break;
-
-    const int srcRow = m.bottomUp ? (m.H - 1 - visualRow) : visualRow;
-    const uint32_t rowOffset = m.fh.bfOffBits + (uint32_t)srcRow * m.rowStride;
-
-    f.seek(rowOffset);
-    if (f.read(rowbuf, m.rowStride) != (int)m.rowStride) { f.close(); return false; }
-
-    if (m.ih.biBitCount == 24) {
-      for (int c = 0; c < img.width; ++c) {
-        const int idx = c * 3;
-        const uint8_t B = rowbuf[idx + 0], G = rowbuf[idx + 1], R = rowbuf[idx + 2];
-        img.row[vr][c] = (uint8_t)(0.299f*R + 0.587f*G + 0.114f*B);
-      }
-    } else {
-      for (int c = 0; c < img.width; ++c) img.row[vr][c] = rowbuf[c];
-    }
+    if (visualRow < 0) continue; // leave this row blank, but later vr's can still be >= 0
+    if (!src.readRow(visualRow, img.row[vr], img.width)) return false;
   }
-
-  f.close();
   return true;
 }
 
@@ -555,6 +677,7 @@ void printEntireBMP(const String &path) {
   display.display();
 
   while (true) {
+    if (checkEStop()) return;
     if (readButton(btnEnter)) break;
     if (readButton(btnMinus)) return;
     delay(10);
@@ -562,6 +685,7 @@ void printEntireBMP(const String &path) {
 
   countdown_1s_tenths("Starting Print");
   for (int slice = 0; slice < totalSlices; ++slice) {
+    if (eStopLatched || cancelRequested) return;
     const int visualStart = slice * 4;
     Image4x img;
     if (!readFourRowsAt(path, meta, visualStart, img)) {
@@ -605,25 +729,28 @@ void printEntireBMP(const String &path) {
   display.display();
   delay(1200);
 }
-void printEntireBMP_4by(const String &path) {
-  BMPMeta meta;
-  if (!loadBMPMeta(path, meta)) {
-    oledHeader("BMP ERROR"); display.setCursor(0,20); display.print("Header error");
-    display.display(); delay(4000); // 4 second pause to ensure you see it
+// The validated 4-pass interlaced print sequence -- shared by SD-file prints and
+// ESP32-triggered prints, driven purely off the RowSource interface so it doesn't care
+// which one it's got.
+static void printFromRowSource(RowSource &src, const String &label) {
+  if (src.width <= 0 || src.height <= 0) {
+    oledHeader("Print Error"); display.setCursor(0, 20);
+    display.print("Bad image"); display.display(); delay(2000);
     return;
   }
 
-  const int totalSlices = meta.H;
+  const int totalSlices = src.height;
 
   oledHeader("Print (Four Passes)");
-  display.setCursor(0, 16); display.print(path);
+  display.setCursor(0, 16); display.print(label);
   display.setCursor(0, 28);
-  displayPrintf(display,"W=%d  H=%d", meta.W, meta.H);
+  displayPrintf(display,"W=%d  H=%d", src.width, src.height);
   display.setCursor(0, 40); displayPrintf(display,"%d passes (1 rows ea.)", totalSlices);
   display.setCursor(0, 54); display.print("[Enter] Start  [-] Back");
   display.display();
 
   while (true) {
+    if (checkEStop()) return;
     if (readButton(btnEnter)) break;
     if (readButton(btnMinus)) return;
     delay(10);
@@ -631,48 +758,21 @@ void printEntireBMP_4by(const String &path) {
 
   countdown_1s_tenths("Starting Print");
 
-  // ==========================================
-  // DEBUG CHECKPOINT 1: Did we survive the countdown?
-  // ==========================================
-  oledHeader("DEBUG 1"); display.setCursor(0, 20);
-  display.print("Countdown finished."); display.display(); delay(2000);
-
-  if (totalSlices <= 0) {
-     oledHeader("DEBUG ERROR"); display.setCursor(0, 20);
-     display.print("totalSlices is 0!"); display.display(); delay(4000);
-     return;
-  }
-
   for (int slice = 0; slice < totalSlices; ++slice) {
+    if (eStopLatched || cancelRequested) return;
     const int visualStart = slice;
     Image4x img;
-    
-    // ==========================================
-    // DEBUG CHECKPOINT 2: Can we read the file?
-    // ==========================================
-    if (!readFourRowsBy(path, meta, visualStart, img)) {
-      oledHeader("DEBUG ERROR");
-      display.setCursor(0, 16); display.print("readFourRowsBy FAILED");
+
+    if (!readFourRowsBy(src, visualStart, img)) {
+      oledHeader("Print Error");
+      display.setCursor(0, 16); display.print("Read failed");
       display.setCursor(0, 28); display.print("Slice: "); display.print(slice);
-      display.display(); delay(4000);
+      display.display(); delay(2000);
       return;
     }
 
-    oledHeader("DEBUG 3"); display.setCursor(0, 20);
-    display.print("File read OK. Moving..."); display.display(); delay(1500);
-
     const bool forward = (slice % 2 == 0);
-    
-    // ==========================================
-    // THE DANGER ZONE: This enables motors & prints
-    // ==========================================
     doPrintBMPSliceSerpentine(img, forward, true);
-
-    // ==========================================
-    // DEBUG CHECKPOINT 4: Did we survive the row?
-    // ==========================================
-    oledHeader("DEBUG 4"); display.setCursor(0, 20);
-    display.print("Row printed!"); display.display(); delay(1500);
 
     if (slice < totalSlices - 1) {
       bool none[4] = {false,false,false,false};
@@ -686,7 +786,23 @@ void printEntireBMP_4by(const String &path) {
   oledHeader("Print");
   display.setCursor(0, 22); display.print("Entire image done.");
   display.display();
-  delay(3000);
+  delay(1200);
+}
+
+void printEntireBMP_4by(const String &path) {
+  BMPFileRowSource src;
+  if (!src.open(path)) {
+    oledHeader("BMP ERROR"); display.setCursor(0,20); display.print("Header error");
+    display.display(); delay(2000);
+    return;
+  }
+  printFromRowSource(src, path);
+}
+
+void printHexData_4by(int w, int h, const String &hexData) {
+  HexRowSource src;
+  src.init(w, h, hexData);
+  printFromRowSource(src, "ESP32");
 }
 
 /**
@@ -724,6 +840,7 @@ void doPrintBMPSliceSerpentine(Image4x &img, bool forward, bool byRow) {
   const float expDiv = byRow ? 0.25f : 1.0f;
 
   for (int s = sStart; ; s += sStep) {
+    if (eStopLatched || cancelRequested) break;
     float x_carriage = s * step_mm;
     uint32_t durations[4] = {0, 0, 0, 0};
     bool willFire[4] = {false, false, false, false};

@@ -1,13 +1,18 @@
 /* ============================================================
- * UV Printhead - TIER 1: ESP32 Web Server
+ * UV Printhead - TIER 1: ESP8266 Web Server
  * - Broadcasts standalone Wi-Fi AP ("Cyanotype_Printer")
  * - Hosts HTML/JS UI
  * - Converts JSON pixel arrays to Hexadecimal
- * - Streams commands to Arduino Mega via Hardware Serial2
+ * - Streams commands to Arduino Mega via serial
  * ============================================================ */
 
+#if defined(ARDUINO_ARCH_ESP8266)
+#include <ESP8266WiFi.h>
+#include <ESP8266WebServer.h>
+#else
 #include <WiFi.h>
 #include <WebServer.h>
+#endif
 #include <ArduinoJson.h>
 
 // --- Network Settings ---
@@ -15,11 +20,21 @@ const char* ssid = "Cyanotype_Printer";
 const char* password = "printmaker123"; // Must be at least 8 chars
 
 // --- Serial Connection to Mega ---
-// Standard ESP32 Serial2 pins: RX = 16, TX = 17
+// On the Mega+WiFi board, the integrated ESP8266 talks to the ATmega2560
+// through the Mega's Serial3 interface (pins 14 RX3 and 15 TX3).
+// Use the ESP8266's main UART for this link.
+#if defined(ARDUINO_ARCH_ESP8266)
+#define MEGA_SERIAL Serial
+#else
 #define MEGA_SERIAL Serial2
+#endif
 #define MEGA_BAUD 115200
 
+#if defined(ARDUINO_ARCH_ESP8266)
+ESP8266WebServer server(80);
+#else
 WebServer server(80);
+#endif
 
 // ============================================================
 // --- FRONTEND FILES (Injected as Raw String Literals) ---
@@ -322,6 +337,6 @@ void loop() {
   
   // Pass any debug messages from the Mega straight to the PC monitor
   if (MEGA_SERIAL.available()) {
-    Serial.write(MEGA_SERIAL.read());
+    //Serial.write(MEGA_SERIAL.read());
   }
 }

@@ -16,17 +16,22 @@
 
 #define PRINTHEAD_SERIAL Serial1
 #define PRINTHEAD_BAUD 115200
-#define ESP_SERIAL Serial3 
+// ESP-side link on the Mega+WiFi board is routed through Serial3.
+#define ESP_SERIAL Serial3
 #define ESP_BAUD 115200
 
 // --- Globals ---
 extern SdFat SD;
 extern Adafruit_SSD1306 display;
 
-extern const int PIN_SD_CS;     
-extern const int PIN_STEP, PIN_DIR, PIN_EN;       
-extern const int PIN_YL_STEP, PIN_YR_STEP, PIN_Y_DIR, PIN_YR_DIR;    
-extern const int PIN_Z_STEP, PIN_Z_DIR, PIN_Z_CONTACT;   
+extern const int PIN_SD_CS;
+extern const int PIN_STEP, PIN_DIR, PIN_EN;
+extern const int PIN_YL_STEP, PIN_YR_STEP, PIN_Y_DIR, PIN_YR_DIR;
+extern const int PIN_Z_STEP, PIN_Z_DIR;
+// Single shared interrupt pin driven by the Nano's PIN_ESTOP_OUT: goes LOW when the
+// Nano's Z limit, Y limit, or thermal cutoff fires (OR'd together on the Nano side).
+extern const int PIN_NANO_ESTOP;
+extern const int PIN_BUZZER;
 
 extern const float Z_HOME_SWITCH_TO_PAPER_MM;
 extern const float Z_MAX_TO_CR_TOUCH_APPROACH_MM;
@@ -34,6 +39,7 @@ extern const float Z_MAX_TO_CR_TOUCH_APPROACH_MM;
 extern Btn btnPlus;
 extern Btn btnMinus;
 extern Btn btnEnter;
+extern Btn btnBack; // Dedicated back/cancel button (pin 29)
 
 extern const int MOTOR_STEPS_PER_REV;
 extern int MICROSTEPS_X, MICROSTEPS_Y;
@@ -50,8 +56,11 @@ extern float z_mesh[3][3];
 extern bool mesh_active;
 extern const float MESH_MAX_X, MESH_MAX_Y;
 
-extern volatile bool emergencyStopTriggered;
-extern volatile bool zHomingActive;
+extern volatile bool emergencyStopTriggered; // Raw ISR flag; classified/consumed by handleEmergencyStop()
+extern volatile bool zHomingActive;          // True while a Z-contact touch is expected (homing/probing)
+extern bool eStopLatched;                    // True once a genuine e-stop is confirmed; requires operator clear
+extern String eStopCause;                    // Human-readable cause of the current latch, e.g. "Z", "Y", "OVERTEMP"
+extern bool cancelRequested;                 // Operator hit Back mid-move/print; abort the current operation only
 extern float LUT16[16];
 extern float LED_SCALE[4];
 
@@ -64,5 +73,6 @@ void serialPrintf(const char *fmt, ...);
 long lround_double(double x);
 void handleEmergencyStop();
 void contactInterruptHandler();
+void buzzReady();
 
 #endif

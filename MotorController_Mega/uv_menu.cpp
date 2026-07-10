@@ -425,20 +425,58 @@ void menuFileBrowser() {
 }
 
 
+void menuCalibPattern() {
+  float maxTimeSec = 2.0f;
+  const float INC_SEC = 0.25f;
+  bool redraw = true;
+
+  while (true) {
+    if (redraw) {
+      oledHeader("Calib Pattern");
+      display.setCursor(0, 18); display.print("Max time: ");
+      display.print(maxTimeSec, 2); display.print(" s");
+      display.setCursor(0, 34); display.print("[+/-] \xC2\xB1 0.25s");
+      display.setCursor(0, 46); display.print("[Enter] Run   [Back] exit");
+      display.display();
+      redraw = false;
+    }
+
+    if (readButton(btnPlus))  { maxTimeSec += INC_SEC; if (maxTimeSec > 5.0f) maxTimeSec = 5.0f; redraw = true; }
+    if (readButton(btnMinus)) { maxTimeSec -= INC_SEC; if (maxTimeSec < 0.1f) maxTimeSec = 0.1f; redraw = true; }
+    if (readButton(btnBack))  return;
+    if (readButton(btnEnter)) {
+      oledHeader("Calib Pattern");
+      display.setCursor(0, 20); display.print("Running...");
+      display.display();
+      printCalibrationPattern(maxTimeSec);
+      cancelRequested = false;
+      oledHeader("Calib Pattern");
+      display.setCursor(0, 20); display.print("Done");
+      display.display();
+      delay(900);
+      return;
+    }
+    delay(10);
+  }
+}
+
 void menuCalib() {
   int sub = 0;
+  const int SUB_ITEMS = 3;
   while (true) {
     if (checkEStop()) return;
     oledHeader("Calibration");
     display.setCursor(0, 20); display.print(sub == 0 ? "> " : "  "); display.print("Fire LED");
     display.setCursor(0, 30); display.print(sub == 1 ? "> " : "  "); display.print("Load LUT");
+    display.setCursor(0, 40); display.print(sub == 2 ? "> " : "  "); display.print("Print Pattern");
     display.setCursor(0, 56); display.print("[+/-]Sel [Ent]Go [Back]x");
     display.display();
 
-    if (readButton(btnPlus))  sub = (sub + 1) % 2;
-    if (readButton(btnMinus)) sub = (sub - 1 + 2) % 2;
+    if (readButton(btnPlus))  sub = (sub + 1) % SUB_ITEMS;
+    if (readButton(btnMinus)) sub = (sub - 1 + SUB_ITEMS) % SUB_ITEMS;
     if (readButton(btnBack))  return;
     if (readButton(btnEnter)) {
+      if (sub == 2) { menuCalibPattern(); continue; }
       if (sub == 0) {
         int step = 0;
         while (true) {

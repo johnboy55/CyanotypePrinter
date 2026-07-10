@@ -499,9 +499,11 @@ bool loadBMPMeta(const String &path, BMPMeta &m) {
 
 bool readFourRowsAt(const String &path, const BMPMeta &m, int visualStart, Image4x &img) {
   img.width = min(MAX_IMG_WIDTH, m.W);
-  for (int r = 0; r < 4; r++)
+  for (int r = 0; r < 4; r++) {
+    img.valid[r] = false;
     for (int c = 0; c < MAX_IMG_WIDTH; c++)
       img.row[r][c] = 0;
+  }
   File f = SD.open(path);
   if (!f) return false;
 
@@ -511,6 +513,7 @@ bool readFourRowsAt(const String &path, const BMPMeta &m, int visualStart, Image
   for (int vr = 0; vr < 4; ++vr) {
     const int visualRow = visualStart + vr;
     if (visualRow >= m.H) break;
+    img.valid[vr] = true;
 
     const int srcRow = m.bottomUp ? (m.H - 1 - visualRow) : visualRow;
     const uint32_t rowOffset = m.fh.bfOffBits + (uint32_t)srcRow * m.rowStride;
@@ -620,14 +623,19 @@ public:
 
 bool readFourRowsBy(RowSource &src, int visualStart, Image4x &img) {
   img.width = min(MAX_IMG_WIDTH, src.width);
-  for (int r = 0; r < 4; r++)
+  for (int r = 0; r < 4; r++) {
+    img.valid[r] = false;
     for (int c = 0; c < MAX_IMG_WIDTH; c++)
       img.row[r][c] = 0;
+  }
 
   for (int vr = 0; vr < 4; ++vr) {
     const int visualRow = visualStart - (3 - vr);
-    if (visualRow < 0) continue; // leave this row blank, but later vr's can still be >= 0
+    // Outside the image (before row 0, or past the last row while the trailing
+    // slices finish exposing it): leave this slot blank/invalid, not an error.
+    if (visualRow < 0 || visualRow >= src.height) continue;
     if (!src.readRow(visualRow, img.row[vr], img.width)) return false;
+    img.valid[vr] = true;
   }
   return true;
 }
@@ -739,7 +747,10 @@ static void printFromRowSource(RowSource &src, const String &label) {
     return;
   }
 
-  const int totalSlices = src.height;
+  // The 4-row rolling window needs 3 extra trailing slices past the last real row so
+  // that row also accumulates its full 4x0.25 exposure (otherwise the last 3 rows of
+  // every print fade out, only receiving 75%/50%/25% of their dose).
+  const int totalSlices = src.height + 3;
 
   oledHeader("Print (Four Passes)");
   display.setCursor(0, 16); display.print(label);
@@ -847,7 +858,9 @@ void doPrintBMPSliceSerpentine(Image4x &img, bool forward, bool byRow) {
     int activeCount = 0;
 
     for (int k = 0; k < 4; k++) {
-      float x_led = x_carriage - k * led_spacing;
+      // (3 - k) ensures LED 3 has 0mm offset (Leading)
+      // and LED 0 has a 21mm offset (Trailing)
+      float x_led = x_carriage - (3 - k) * led_spacing;
       long x_led_mm = lround_double(x_led);
       
       // A pixel t is at t * mm_per_pixel.
@@ -855,7 +868,7 @@ void doPrintBMPSliceSerpentine(Image4x &img, bool forward, bool byRow) {
       // Since mm_per_pixel = 2.0, we check if x_led is even and >= 0.
       if (x_led_mm >= 0 && (x_led_mm % 2 == 0)) {
         int t = x_led_mm / 2;
-        if (t < img.width) {
+        if (t < img.width && img.valid[ ROW_FOR_LED[k] ]) {
           uint8_t v = img.row[ ROW_FOR_LED[k] ][t];
           if (CFG.invertImage) v = 255 - v;
           const float dur_s = lutExposureFromByte(v) * expDiv;
@@ -878,6 +891,111 @@ void doPrintBMPSliceSerpentine(Image4x &img, bool forward, bool byRow) {
 
     if (s == sEnd) break;
     stepN(steps_per_1mm, forward);
+  }
+
+  digitalWrite(PIN_EN, HIGH);
+}
+
+/**
+ * @brief Calibration pattern to isolate individual LEDs and reveal X-axis backlash.
+ *
+ * Rows 0-7: fires only LED 3 (the leading LED) at a fixed X target on alternating
+ * forward/backward passes. Any offset between the forward-pass and backward-pass marks
+ * is backlash. Rows 8-15: fires all 4 LEDs into 4 separate X bands (12mm apart) at
+ * 33/66/100% of maxTimeSec, so each LED's exposure response can be read independently.
+ *
+ * @param maxTimeSec Exposure duration used as the 100% reference for the gradient test.
+ */
+void printCalibrationPattern(float maxTimeSec) {
+  digitalWrite(PIN_EN, LOW);
+
+  // Constants to match your machine's physical reality
+  const float step_mm = 1.0f;
+  const float max_x_mm = 65.0f; // Wide enough for all LEDs to clear their test zones
+  const long steps_per_1mm = lround_double(step_mm * STEPS_PER_MM_X);
+  const int total_steps = (int)(max_x_mm / step_mm) + 1;
+
+  // We will print exactly 16 rows
+  for (int row = 0; row < 16; ++row) {
+    if (eStopLatched || cancelRequested) break;
+
+    bool forward = (row % 2 == 0);
+
+    if (forward) moveToSteps(0);
+    else         moveToSteps(lround_double(max_x_mm * STEPS_PER_MM_X));
+
+    int sStart = forward ? 0 : total_steps - 1;
+    int sEnd   = forward ? total_steps - 1 : 0;
+    int sStep  = forward ? 1 : -1;
+
+    for (int s = sStart; ; s += sStep) {
+      if (eStopLatched || cancelRequested) break;
+
+      float x_carriage = s * step_mm;
+      uint32_t durations[4] = {0, 0, 0, 0};
+      bool willFire[4] = {false, false, false, false};
+      int activeCount = 0;
+
+      for (int k = 0; k < 4; k++) {
+        // Using our confirmed physical X-axis mapping
+        float x_led = x_carriage - (3 - k) * LED_SPACING_MM;
+        long x_led_mm = lround_double(x_led);
+
+        // ==========================================
+        // TEST 1: THE BACKLASH "ZIPPER" (Rows 0-7)
+        // ==========================================
+        if (row < 8) {
+          // We fire ONLY LED 3 (Top) at exactly X = 10mm.
+          // Because we print bi-directionally, this will reveal backlash.
+          if (k == 3 && x_led_mm == 10) {
+            durations[k] = (uint32_t)(maxTimeSec * 1000000.0f);
+            willFire[k] = true;
+            activeCount++;
+          }
+        }
+        // ==========================================
+        // TEST 2: LED EXPOSURE GRADIENTS (Rows 8-15)
+        // ==========================================
+        else {
+          // We space the LEDs out into 4 distinct blocks across the paper
+          // LED 3 starts at 4mm, LED 2 at 16mm, LED 1 at 28mm, LED 0 at 40mm
+          int target_base_x = 4 + (3 - k) * 12;
+
+          // Print 3 pixels for each LED, scaling the exposure time based on maxTimeSec
+          if (x_led_mm == target_base_x) {
+            durations[k] = (uint32_t)(maxTimeSec * 0.33f * 1000000.0f); // 33% Density
+            willFire[k] = true;
+            activeCount++;
+          }
+          else if (x_led_mm == target_base_x + 2) {
+            durations[k] = (uint32_t)(maxTimeSec * 0.66f * 1000000.0f); // 66% Density
+            willFire[k] = true;
+            activeCount++;
+          }
+          else if (x_led_mm == target_base_x + 4) {
+            durations[k] = (uint32_t)(maxTimeSec * 1.00f * 1000000.0f); // 100% Density
+            willFire[k] = true;
+            activeCount++;
+          }
+        }
+      }
+
+      if (activeCount > 0) {
+        char buf[32];
+        snprintf(buf, sizeof(buf), "R%d X%.0fmm", row, x_carriage);
+        drawStatusRow(willFire, String(buf));
+        sendBatchToPrinthead(durations);
+        waitForPrinthead();
+      }
+
+      if (s == sEnd) break;
+      stepN(steps_per_1mm, forward);
+    }
+
+    if (eStopLatched || cancelRequested) break;
+
+    // Move down 1 pixel (2mm) for the next row
+    yMoveMM(MM_PER_PIXEL, true);
   }
 
   digitalWrite(PIN_EN, HIGH);

@@ -92,7 +92,7 @@ void writeDefaultConfigIfMissing(const char* path) {
   f.println("# UV Printer config (key=value). Comments start with # or ;");
   f.println("y_band_mm=8.2");
   f.println("mm_per_pixel=2.0");
-  f.println("led_spacing_mm=20.0");
+  f.println("led_spacing_mm=7.0");
   f.println("step_period_us=1000");
   f.println("step_pulse_us=5");
   f.println("led_scales=1.000,1.000,1.000,1.000");

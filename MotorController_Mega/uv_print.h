@@ -49,5 +49,6 @@ void printHexData_4by(int w, int h, const String &hexData);
 
 // PROTOTYPES FOR MISSING FUNCTIONS
 void doPrintBMPSliceSerpentine(Image4x &img, bool forward, bool singlePass);
+void printCalibrationPattern(float maxTimeSec);
 
 #endif

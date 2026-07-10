@@ -16,6 +16,10 @@ struct Btn {
 struct Image4x {
   int width;
   uint8_t row[4][MAX_IMG_WIDTH];
+  // True for rows filled with real source data; false for rolling-window padding
+  // rows (before the first row / past the last row of the image) that must never
+  // be exposed, regardless of CFG.invertImage.
+  bool valid[4];
 };
 
 // SD browser entry for the OLED file browser
@@ -28,7 +32,7 @@ struct Entry {
 struct Config {
   float yBandAdvanceMM = 4.0f;
   float mmPerPixel = 2.0f;
-  float ledSpacingMM = 20.0f;
+  float ledSpacingMM = 7.0f;
   bool invertImage = false;
   float ledScale[4] = {1.0f, 1.0f, 1.0f, 1.0f}; // Added missing array
   int stepPeriodUs = 1000;                      // Added missing var

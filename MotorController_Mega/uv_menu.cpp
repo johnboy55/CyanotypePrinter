@@ -679,11 +679,11 @@ static void runIncomingPrint(int w, int h, const String &hexData) {
   }
 
   bool fan1On = true, fan2On = true;
-  digitalWrite(PIN_VAC_RELAY_1, HIGH);
-  digitalWrite(PIN_VAC_RELAY_2, HIGH);
+  setVacRelay(PIN_VAC_RELAY_1, true);
+  setVacRelay(PIN_VAC_RELAY_2, true);
   bool redraw = true;
   while (true) {
-    if (checkEStop()) { digitalWrite(PIN_VAC_RELAY_1, LOW); digitalWrite(PIN_VAC_RELAY_2, LOW); return; }
+    if (checkEStop()) { setVacRelay(PIN_VAC_RELAY_1, false); setVacRelay(PIN_VAC_RELAY_2, false); return; }
     if (redraw) {
       oledHeader("Seat Paper");
       display.setCursor(0, 14); display.print("Fan 1: "); display.print(fan1On ? "ON" : "off");
@@ -694,23 +694,23 @@ static void runIncomingPrint(int w, int h, const String &hexData) {
       redraw = false;
     }
     if (readButton(btnMinus)) {
-      if (fan2On)      { fan2On = false; digitalWrite(PIN_VAC_RELAY_2, LOW); redraw = true; }
-      else if (fan1On) { fan1On = false; digitalWrite(PIN_VAC_RELAY_1, LOW); redraw = true; }
+      if (fan2On)      { fan2On = false; setVacRelay(PIN_VAC_RELAY_2, false); redraw = true; }
+      else if (fan1On) { fan1On = false; setVacRelay(PIN_VAC_RELAY_1, false); redraw = true; }
     }
     if (readButton(btnPlus)) {
-      if (!fan1On)      { fan1On = true; digitalWrite(PIN_VAC_RELAY_1, HIGH); redraw = true; }
-      else if (!fan2On) { fan2On = true; digitalWrite(PIN_VAC_RELAY_2, HIGH); redraw = true; }
+      if (!fan1On)      { fan1On = true; setVacRelay(PIN_VAC_RELAY_1, true); redraw = true; }
+      else if (!fan2On) { fan2On = true; setVacRelay(PIN_VAC_RELAY_2, true); redraw = true; }
     }
     if (readButton(btnEnter)) break;
-    if (readButton(btnBack)) { digitalWrite(PIN_VAC_RELAY_1, LOW); digitalWrite(PIN_VAC_RELAY_2, LOW); return; }
+    if (readButton(btnBack)) { setVacRelay(PIN_VAC_RELAY_1, false); setVacRelay(PIN_VAC_RELAY_2, false); return; }
     delay(10);
   }
 
   // The attendant already confirmed above, so skip the print engine's own start prompt.
   printHexData_4by(w, h, hexData, true);
 
-  digitalWrite(PIN_VAC_RELAY_1, LOW);
-  digitalWrite(PIN_VAC_RELAY_2, LOW);
+  setVacRelay(PIN_VAC_RELAY_1, false);
+  setVacRelay(PIN_VAC_RELAY_2, false);
   if (eStopLatched) return; // Let loop() show the e-stop screen instead of homing.
 
   bool completedOk = !cancelRequested;

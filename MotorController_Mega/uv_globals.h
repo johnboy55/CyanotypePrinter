@@ -35,8 +35,13 @@ extern const int PIN_BUZZER;
 // Spare pins on the bare header, immediately after btnBack (29): 30-37.
 // TODO confirm these against actual wiring before relying on them.
 extern const int PIN_ALERT_BUZZER; // 30 -- attendant-facing "print incoming" / success chime
-extern const int PIN_VAC_RELAY_1;  // 31 -- vacuum blower fan 1 (assumes active-HIGH relay driver)
-extern const int PIN_VAC_RELAY_2;  // 32 -- vacuum blower fan 2 (assumes active-HIGH relay driver)
+extern const int PIN_VAC_RELAY_1;  // 31 -- vacuum blower fan 1 (active-LOW relay driver)
+extern const int PIN_VAC_RELAY_2;  // 32 -- vacuum blower fan 2 (active-LOW relay driver)
+
+// The relay board is active-LOW: pull the pin LOW to energize the relay (fan on).
+// Every fan on/off toggle should go through this rather than raw digitalWrite, so the
+// polarity only ever needs correcting in one place.
+inline void setVacRelay(int pin, bool on) { digitalWrite(pin, on ? LOW : HIGH); }
 
 extern const float Z_HOME_SWITCH_TO_PAPER_MM;
 extern const float Z_MAX_TO_CR_TOUCH_APPROACH_MM;

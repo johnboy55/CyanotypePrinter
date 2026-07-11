@@ -24,8 +24,8 @@ const int PIN_BUZZER = 9;      // Piezo buzzer: alerts operator that an ESP32-tr
 // Spare pins on the bare header, immediately after btnBack (29): 30-37.
 // TODO confirm these against actual wiring before relying on them.
 const int PIN_ALERT_BUZZER = 30; // Attendant-facing "print incoming" / success chime
-const int PIN_VAC_RELAY_1  = 31; // Vacuum blower fan 1 (assumes active-HIGH relay driver)
-const int PIN_VAC_RELAY_2  = 32; // Vacuum blower fan 2 (assumes active-HIGH relay driver)
+const int PIN_VAC_RELAY_1  = 31; // Vacuum blower fan 1 (active-LOW relay driver)
+const int PIN_VAC_RELAY_2  = 32; // Vacuum blower fan 2 (active-LOW relay driver)
 
 const float Z_HOME_SWITCH_TO_PAPER_MM = 8.0f;
 const float Z_MAX_TO_CR_TOUCH_APPROACH_MM = 12.0f;
@@ -137,8 +137,8 @@ void setup() {
   pinMode(PIN_BUZZER, OUTPUT);
 
   pinMode(PIN_ALERT_BUZZER, OUTPUT);
-  pinMode(PIN_VAC_RELAY_1, OUTPUT); digitalWrite(PIN_VAC_RELAY_1, LOW);
-  pinMode(PIN_VAC_RELAY_2, OUTPUT); digitalWrite(PIN_VAC_RELAY_2, LOW);
+  pinMode(PIN_VAC_RELAY_1, OUTPUT); setVacRelay(PIN_VAC_RELAY_1, false);
+  pinMode(PIN_VAC_RELAY_2, OUTPUT); setVacRelay(PIN_VAC_RELAY_2, false);
 
 
   STEPS_PER_MM_X  = (MOTOR_STEPS_PER_REV * MICROSTEPS_X) / LEAD_MM_X;

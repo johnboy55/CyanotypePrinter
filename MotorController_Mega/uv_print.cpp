@@ -104,6 +104,22 @@ int queryNanoLimitMask() {
   return -1; // Nano not responding -- never assume this means "safe".
 }
 
+// T[0] from the Nano's "T:t0,t1,t2,t3,t4,t5" reply is the printhead LED temperature (C).
+int queryNanoLEDTempC() {
+  PRINTHEAD_SERIAL.print("T\n");
+  unsigned long timeout = millis();
+  while (!PRINTHEAD_SERIAL.available() && millis() - timeout < 100) {}
+  if (PRINTHEAD_SERIAL.available()) {
+    String resp = PRINTHEAD_SERIAL.readStringUntil('\n'); resp.trim();
+    if (resp.startsWith("T:")) {
+      String rest = resp.substring(2);
+      int comma = rest.indexOf(',');
+      return (comma > 0 ? rest.substring(0, comma) : rest).toInt();
+    }
+  }
+  return -100; // Nano not responding -- caller should render this as "--" rather than a real reading.
+}
+
 static String describeEStopCause(int mask) {
   if (mask < 0) return "NANO OFFLINE";
   if (mask == 0) return "UNKNOWN";
@@ -391,6 +407,16 @@ void yMoveSkewMM(float baseMM, float deltaRightMM, bool forward) {
   STEP_PERIOD_US = oldPeriod;
 }
 
+// Y-axis counterpart to moveToSteps(0) for X: returns the carriage to Y=0 from wherever
+// currentStepsY currently tracks. yStepPair's dir=true increases currentStepsY, so we
+// move backward (dir=false) from a positive count and forward from a negative one.
+void moveYToZero() {
+  if (currentStepsY == 0) return;
+  bool forward = (currentStepsY < 0);
+  float mm = abs((float)currentStepsY / STEPS_PER_MM_Y);
+  yMoveMM(mm, forward);
+}
+
 void xMoveMM(float mm, bool right) { 
   long s = lround_double(mm * STEPS_PER_MM_X); 
   int oldPeriod = STEP_PERIOD_US;
@@ -559,6 +585,11 @@ class RowSource {
 public:
   int width = 0;
   int height = 0;
+  // Whether CFG.invertImage should apply to this source. BMP files use it (their
+  // grayscale convention needs inverting for correct UV exposure); the ESP32's hex
+  // payload already encodes intensity directly -- higher value the operator drew
+  // darker, which should mean *more* exposure -- so it must never be inverted.
+  bool wantsInvert = true;
   virtual bool readRow(int row, uint8_t *out, int cols) = 0; // fills out[0..cols-1], cols <= width
   virtual ~RowSource() {}
 };
@@ -611,7 +642,7 @@ public:
 class HexRowSource : public RowSource {
   const String *hexData;
 public:
-  void init(int w, int h, const String &hex) { width = w; height = h; hexData = &hex; }
+  void init(int w, int h, const String &hex) { width = w; height = h; hexData = &hex; wantsInvert = false; }
   bool readRow(int row, uint8_t *out, int cols) override {
     for (int c = 0; c < cols; c++) {
       const int idx = row * width + c;
@@ -711,7 +742,7 @@ void printEntireBMP(const String &path) {
     display.setCursor(0, 42); displayPrintf(display,"Rows %d..%d", visualStart, min(meta.H-1, visualStart+3));
     display.display();
     const bool forward = (slice % 2 == 0);
-    doPrintBMPSliceSerpentine(img, forward, false);
+    doPrintBMPSliceSerpentine(img, forward, false, true);
     if (slice < totalSlices - 1) {
       bool none[4] = {false,false,false,false};
       char buf[24];
@@ -740,7 +771,7 @@ void printEntireBMP(const String &path) {
 // The validated 4-pass interlaced print sequence -- shared by SD-file prints and
 // ESP32-triggered prints, driven purely off the RowSource interface so it doesn't care
 // which one it's got.
-static void printFromRowSource(RowSource &src, const String &label) {
+static void printFromRowSource(RowSource &src, const String &label, bool skipStartPrompt) {
   if (src.width <= 0 || src.height <= 0) {
     oledHeader("Print Error"); display.setCursor(0, 20);
     display.print("Bad image"); display.display(); delay(2000);
@@ -752,19 +783,21 @@ static void printFromRowSource(RowSource &src, const String &label) {
   // every print fade out, only receiving 75%/50%/25% of their dose).
   const int totalSlices = src.height + 3;
 
-  oledHeader("Print (Four Passes)");
-  display.setCursor(0, 16); display.print(label);
-  display.setCursor(0, 28);
-  displayPrintf(display,"W=%d  H=%d", src.width, src.height);
-  display.setCursor(0, 40); displayPrintf(display,"%d passes (1 rows ea.)", totalSlices);
-  display.setCursor(0, 54); display.print("[Enter] Start  [-] Back");
-  display.display();
+  if (!skipStartPrompt) {
+    oledHeader("Print (Four Passes)");
+    display.setCursor(0, 16); display.print(label);
+    display.setCursor(0, 28);
+    displayPrintf(display,"W=%d  H=%d", src.width, src.height);
+    display.setCursor(0, 40); displayPrintf(display,"%d passes (1 rows ea.)", totalSlices);
+    display.setCursor(0, 54); display.print("[Enter] Start  [-] Back");
+    display.display();
 
-  while (true) {
-    if (checkEStop()) return;
-    if (readButton(btnEnter)) break;
-    if (readButton(btnMinus)) return;
-    delay(10);
+    while (true) {
+      if (checkEStop()) return;
+      if (readButton(btnEnter)) break;
+      if (readButton(btnMinus)) return;
+      delay(10);
+    }
   }
 
   countdown_1s_tenths("Starting Print");
@@ -782,8 +815,19 @@ static void printFromRowSource(RowSource &src, const String &label) {
       return;
     }
 
+    // Row/temp are steady for the whole slice, so redraw them once here rather than
+    // on every column -- doPrintBMPSliceSerpentine only touches the footer LED/col row.
+    const int rowShown = min(slice + 1, src.height);
+    const int tempC = queryNanoLEDTempC();
+    oledHeader("Printing");
+    display.setCursor(0, 12); displayPrintf(display, "Row %d/%d", rowShown, src.height);
+    display.setCursor(70, 12);
+    if (tempC > -100) displayPrintf(display, "T:%dC", tempC); else display.print("T:--");
+    display.setCursor(0, 24); display.print(label);
+    display.display();
+
     const bool forward = (slice % 2 == 0);
-    doPrintBMPSliceSerpentine(img, forward, true);
+    doPrintBMPSliceSerpentine(img, forward, true, src.wantsInvert);
 
     if (slice < totalSlices - 1) {
       bool none[4] = {false,false,false,false};
@@ -807,13 +851,13 @@ void printEntireBMP_4by(const String &path) {
     display.display(); delay(2000);
     return;
   }
-  printFromRowSource(src, path);
+  printFromRowSource(src, path, false);
 }
 
-void printHexData_4by(int w, int h, const String &hexData) {
+void printHexData_4by(int w, int h, const String &hexData, bool skipStartPrompt) {
   HexRowSource src;
   src.init(w, h, hexData);
-  printFromRowSource(src, "ESP32");
+  printFromRowSource(src, "ESP32", skipStartPrompt);
 }
 
 /**
@@ -825,12 +869,13 @@ void printHexData_4by(int w, int h, const String &hexData) {
  * interlaced printing is active (byRow), and sent to the Nano printhead via serial. 
  * The function waits for the Nano to finish exposing before stepping to the next pixel.
  * 
- * @param img     The Image4x buffer containing the pixel data for the current rows.
- * @param forward True to sweep forward (pixel 0 to end), false for reverse.
- * @param byRow   If true, reduces exposure by a factor of 4 (used for interlaced printing).
+ * @param img         The Image4x buffer containing the pixel data for the current rows.
+ * @param forward     True to sweep forward (pixel 0 to end), false for reverse.
+ * @param byRow       If true, reduces exposure by a factor of 4 (used for interlaced printing).
+ * @param applyInvert Whether CFG.invertImage should apply to this data (see RowSource::wantsInvert).
  */
 
-void doPrintBMPSliceSerpentine(Image4x &img, bool forward, bool byRow) {
+void doPrintBMPSliceSerpentine(Image4x &img, bool forward, bool byRow, bool applyInvert) {
   digitalWrite(PIN_EN, LOW);
 
   const float mm_per_pixel = MM_PER_PIXEL; 
@@ -870,7 +915,7 @@ void doPrintBMPSliceSerpentine(Image4x &img, bool forward, bool byRow) {
         int t = x_led_mm / 2;
         if (t < img.width && img.valid[ ROW_FOR_LED[k] ]) {
           uint8_t v = img.row[ ROW_FOR_LED[k] ][t];
-          if (CFG.invertImage) v = 255 - v;
+          if (CFG.invertImage && applyInvert) v = 255 - v;
           const float dur_s = lutExposureFromByte(v) * expDiv;
           if (dur_s > 0.0f) { 
             durations[k] = (uint32_t)(dur_s * 1000000.0f);
@@ -882,8 +927,13 @@ void doPrintBMPSliceSerpentine(Image4x &img, bool forward, bool byRow) {
     }
 
     if (activeCount > 0) {
+      // LED 3 (k=3) is the leading LED with 0mm offset, so its target column is the
+      // most representative "current column" for the whole sweep at this instant.
+      int col = (int)(x_carriage / mm_per_pixel);
+      if (col < 0) col = 0;
+      if (col >= img.width) col = img.width - 1;
       char buf[32];
-      snprintf(buf, sizeof(buf), "X %.1fmm", x_carriage);
+      snprintf(buf, sizeof(buf), "Col %d/%d", col + 1, img.width);
       drawStatusRow(willFire, String(buf));
       sendBatchToPrinthead(durations);
       waitForPrinthead();

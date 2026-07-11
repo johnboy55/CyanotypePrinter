@@ -661,39 +661,137 @@ void menuUtilities() {
   }
 }
 
-void menuESP32Control() {
-  oledHeader("ESP32 Mode"); display.setCursor(0, 16); display.print("Waiting for ESP32...");
-  display.setCursor(0, 56); display.print("[Back] to exit"); display.display();
-
-  ESP_SERIAL.println("READY"); bool exitScreen = false;
-  while (!exitScreen) {
+// Runs once a validated "P:w,h:hexdata" arrives while online: alerts the attendant,
+// lets them stage paper on the vacuum bed (toggling the two blower relays), then prints
+// and returns the carriage home. Returns to the idle online screen on cancel/e-stop too.
+static void runIncomingPrint(int w, int h, const String &hexData) {
+  buzzPrintIncoming();
+  oledHeader("Print Incoming");
+  display.setCursor(0, 20); display.print("Place paper on bed");
+  display.setCursor(0, 48); display.print("[Enter] Continue");
+  display.setCursor(0, 56); display.print("[Back] Cancel print");
+  display.display();
+  while (true) {
     if (checkEStop()) return;
-    if (ESP_SERIAL.available()) {
+    if (readButton(btnEnter)) break;
+    if (readButton(btnBack)) return;
+    delay(10);
+  }
 
-      String cmd = ESP_SERIAL.readStringUntil('\n'); cmd.trim();
-       display.setCursor(0, 24); display.print("RX" + cmd); display.display();
-      if (cmd.startsWith("P:")) {
-        display.setCursor(0, 32); display.print("RECEIVED DATA"); display.display();
-        int comma = cmd.indexOf(','); int colon = cmd.indexOf(':', comma);
-        int w = (comma > 0 && colon > 0) ? cmd.substring(2, comma).toInt() : 0;
-        int h = (comma > 0 && colon > 0) ? cmd.substring(comma + 1, colon).toInt() : 0;
-        if (comma > 0 && colon > 0 && w > 0 && h > 0) {
-          String hexData = cmd.substring(colon + 1);
-          // Same validated 4-pass print engine a normal SD-card print uses, reading
-          // straight from hexData in RAM -- no SD round-trip.
-          buzzReady(); // Alert the operator: paper needs to go on, then [Enter] to start.
-          printHexData_4by(w, h, hexData);
-          ESP_SERIAL.println((eStopLatched || cancelRequested) ? "error" : "finish");
-          if (eStopLatched) return; // Let loop() show the e-stop screen instead of "Waiting...".
-          cancelRequested = false;
-          oledHeader("ESP32 Mode"); display.setCursor(0, 16); display.print("Waiting..."); display.display();
-        } else {
-          ESP_SERIAL.println("error");
+  bool fan1On = true, fan2On = true;
+  digitalWrite(PIN_VAC_RELAY_1, HIGH);
+  digitalWrite(PIN_VAC_RELAY_2, HIGH);
+  bool redraw = true;
+  while (true) {
+    if (checkEStop()) { digitalWrite(PIN_VAC_RELAY_1, LOW); digitalWrite(PIN_VAC_RELAY_2, LOW); return; }
+    if (redraw) {
+      oledHeader("Seat Paper");
+      display.setCursor(0, 14); display.print("Fan 1: "); display.print(fan1On ? "ON" : "off");
+      display.setCursor(0, 24); display.print("Fan 2: "); display.print(fan2On ? "ON" : "off");
+      display.setCursor(0, 40); display.print("[+/-] Fans  [Ent] Start");
+      display.setCursor(0, 50); display.print("[Back] Cancel print");
+      display.display();
+      redraw = false;
+    }
+    if (readButton(btnMinus)) {
+      if (fan2On)      { fan2On = false; digitalWrite(PIN_VAC_RELAY_2, LOW); redraw = true; }
+      else if (fan1On) { fan1On = false; digitalWrite(PIN_VAC_RELAY_1, LOW); redraw = true; }
+    }
+    if (readButton(btnPlus)) {
+      if (!fan1On)      { fan1On = true; digitalWrite(PIN_VAC_RELAY_1, HIGH); redraw = true; }
+      else if (!fan2On) { fan2On = true; digitalWrite(PIN_VAC_RELAY_2, HIGH); redraw = true; }
+    }
+    if (readButton(btnEnter)) break;
+    if (readButton(btnBack)) { digitalWrite(PIN_VAC_RELAY_1, LOW); digitalWrite(PIN_VAC_RELAY_2, LOW); return; }
+    delay(10);
+  }
+
+  // The attendant already confirmed above, so skip the print engine's own start prompt.
+  printHexData_4by(w, h, hexData, true);
+
+  digitalWrite(PIN_VAC_RELAY_1, LOW);
+  digitalWrite(PIN_VAC_RELAY_2, LOW);
+  if (eStopLatched) return; // Let loop() show the e-stop screen instead of homing.
+
+  bool completedOk = !cancelRequested;
+  cancelRequested = false;
+  if (completedOk) buzzPrintSuccess();
+
+  oledHeader("Homing"); display.setCursor(0, 20); display.print("Returning to origin"); display.display();
+  moveToSteps(0);
+  moveYToZero();
+  cancelRequested = false;
+}
+
+void menuESP32Control() {
+  String ip = "waiting...";
+  bool online = false;
+  int tempC = -100;
+  unsigned long lastTempPoll = 0;
+  String inBuf = "";
+  bool redraw = true;
+
+  ESP_SERIAL.println("OFFLINE"); // In case a previous session left the ESP32 thinking it's online.
+
+  while (true) {
+    if (checkEStop()) { if (online) ESP_SERIAL.println("OFFLINE"); return; }
+
+    // Drain lines from the ESP32: periodic "IP:..." broadcasts, and (while online)
+    // a staged "P:w,h:hexdata" print command.
+    while (ESP_SERIAL.available()) {
+      char c = ESP_SERIAL.read();
+      if (c == '\n') {
+        String line = inBuf; line.trim(); inBuf = "";
+        if (line.startsWith("IP:")) {
+          ip = line.substring(3);
+          redraw = true;
+        } else if (online && line.startsWith("P:")) {
+          int comma = line.indexOf(','); int colon = line.indexOf(':', comma);
+          int w = (comma > 0 && colon > 0) ? line.substring(2, comma).toInt() : 0;
+          int h = (comma > 0 && colon > 0) ? line.substring(comma + 1, colon).toInt() : 0;
+          if (comma > 0 && colon > 0 && w > 0 && h > 0) {
+            String hexData = line.substring(colon + 1);
+            runIncomingPrint(w, h, hexData);
+            ESP_SERIAL.println(eStopLatched ? "error" : "finish");
+            if (eStopLatched) return; // Let loop() show the e-stop screen instead of "Waiting...".
+          } else {
+            ESP_SERIAL.println("error");
+          }
+          redraw = true;
         }
+      } else {
+        inBuf += c;
       }
     }
-    if (readButton(btnBack)) { ESP_SERIAL.println("EXIT"); return; }
-    delay(5);
+
+    if (millis() - lastTempPoll > 1000) {
+      tempC = queryNanoLEDTempC();
+      lastTempPoll = millis();
+      redraw = true;
+    }
+
+    if (redraw) {
+      oledHeader(online ? "ESP32: ONLINE" : "ESP32: OFFLINE");
+      display.setCursor(0, 12); display.print("IP: "); display.print(ip);
+      display.setCursor(0, 24);
+      if (tempC > -100) displayPrintf(display, "LED Temp: %dC", tempC); else display.print("LED Temp: --");
+      display.setCursor(0, 40); display.print(online ? "Waiting for print..." : "[Enter] Go Online");
+      display.setCursor(0, 52); display.print(online ? "[Back] Go Offline" : "[Back] Exit");
+      display.display();
+      redraw = false;
+    }
+
+    if (readButton(btnEnter) && !online) {
+      online = true;
+      ESP_SERIAL.println("ONLINE");
+      redraw = true;
+    }
+    if (readButton(btnBack)) {
+      if (online) { online = false; ESP_SERIAL.println("OFFLINE"); redraw = true; }
+      else return;
+    }
+
+    delay(10);
   }
 }
 

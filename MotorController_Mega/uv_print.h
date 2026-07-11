@@ -9,6 +9,7 @@ bool isZMaxSwitchPressed();
 
 // --- Emergency stop ---
 int queryNanoLimitMask();   // -1 = Nano not responding, else bit0=Z bit1=Y bit2=overtemp
+int queryNanoLEDTempC();    // -100 = Nano not responding, else printhead LED temp in C
 bool checkEStop();          // Services the raw ISR flag; returns true if caller should abort its loop
 void clearEmergencyStop();  // Operator-initiated resume after inspecting the cause
 
@@ -36,6 +37,7 @@ void moveToSteps(long target);
 void moveToPixel(long p);
 void yMoveMM(float mm, bool forward);
 void yMoveSkewMM(float baseMM, float deltaRightMM, bool forward);
+void moveYToZero();
 void xMoveMM(float mm, bool right);
 void zMoveMM(float mm, bool down);
 
@@ -45,10 +47,15 @@ void countdown_1s_tenths(const char* label);
 
 // Runs the exact same validated 4-pass print engine as printEntireBMP_4by(), but reads
 // pixels straight from the in-memory hex string the ESP32 sent (no SD round-trip).
-void printHexData_4by(int w, int h, const String &hexData);
+// skipStartPrompt: true when the caller (the ESP32 online flow) already got an explicit
+// operator confirmation via its own vacuum/paper-seat screen, so the engine's own
+// "[Enter] Start" gate would just be a redundant second confirmation.
+void printHexData_4by(int w, int h, const String &hexData, bool skipStartPrompt = false);
 
 // PROTOTYPES FOR MISSING FUNCTIONS
-void doPrintBMPSliceSerpentine(Image4x &img, bool forward, bool singlePass);
+// applyInvert: whether CFG.invertImage should apply to this data -- true for BMPs,
+// false for ESP32 hex data (which already encodes intensity directly).
+void doPrintBMPSliceSerpentine(Image4x &img, bool forward, bool singlePass, bool applyInvert = true);
 void printCalibrationPattern(float maxTimeSec);
 
 #endif

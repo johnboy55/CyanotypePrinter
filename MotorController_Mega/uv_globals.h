@@ -32,6 +32,11 @@ extern const int PIN_Z_STEP, PIN_Z_DIR;
 // Nano's Z limit, Y limit, or thermal cutoff fires (OR'd together on the Nano side).
 extern const int PIN_NANO_ESTOP;
 extern const int PIN_BUZZER;
+// Spare pins on the bare header, immediately after btnBack (29): 30-37.
+// TODO confirm these against actual wiring before relying on them.
+extern const int PIN_ALERT_BUZZER; // 30 -- attendant-facing "print incoming" / success chime
+extern const int PIN_VAC_RELAY_1;  // 31 -- vacuum blower fan 1 (assumes active-HIGH relay driver)
+extern const int PIN_VAC_RELAY_2;  // 32 -- vacuum blower fan 2 (assumes active-HIGH relay driver)
 
 extern const float Z_HOME_SWITCH_TO_PAPER_MM;
 extern const float Z_MAX_TO_CR_TOUCH_APPROACH_MM;
@@ -74,5 +79,7 @@ long lround_double(double x);
 void handleEmergencyStop();
 void contactInterruptHandler();
 void buzzReady();
+void buzzPrintIncoming(); // Attendant alert: a validated print arrived, go seat paper
+void buzzPrintSuccess();  // Print finished successfully
 
 #endif

@@ -36,6 +36,33 @@ ESP8266WebServer server(80);
 WebServer server(80);
 #endif
 
+// --- Mega link state ---
+// The Mega drives this from its ESP32-mode menu: ONLINE/OFFLINE gate whether an
+// attendant is actually watching the printer, so we don't accept a print nobody
+// will notice arrived. printerBusy additionally blocks a second submission from
+// landing on top of one the Mega is still physically running.
+bool printerOnline = false;
+bool printerBusy = false;
+String megaInBuf = "";
+unsigned long lastIpBroadcast = 0;
+const unsigned long IP_BROADCAST_MS = 2000;
+
+void sendIpToMega() {
+  MEGA_SERIAL.print("IP:");
+  MEGA_SERIAL.println(WiFi.softAPIP());
+}
+
+void handleMegaLine(String line) {
+  line.trim();
+  if (line == "ONLINE") {
+    printerOnline = true;
+  } else if (line == "OFFLINE") {
+    printerOnline = false;
+  } else if (line == "finish" || line == "error") {
+    printerBusy = false;
+  }
+}
+
 // ============================================================
 // --- FRONTEND FILES (Injected as Raw String Literals) ---
 // ============================================================
@@ -259,6 +286,15 @@ void handleJS() {
 }
 
 void handlePrint() {
+  if (!printerOnline) {
+    server.send(503, "text/plain", "Printer is offline -- attendant hasn't gone online yet");
+    return;
+  }
+  if (printerBusy) {
+    server.send(503, "text/plain", "Printer is busy with another print");
+    return;
+  }
+
   if (server.hasArg("plain") == false) {
     server.send(400, "text/plain", "Body not received");
     return;
@@ -295,6 +331,7 @@ void handlePrint() {
 
   // Fire over UART to the Mega!
   // Format exactly what Mega expects: "P:w,h:HEXDATA\n"
+  printerBusy = true;
   MEGA_SERIAL.print("P:");
   MEGA_SERIAL.print(w);
   MEGA_SERIAL.print(",");
@@ -330,13 +367,29 @@ void setup() {
 
   server.begin();
   Serial.println("Web server started.");
+
+  megaInBuf.reserve(32);
+  sendIpToMega();
+  lastIpBroadcast = millis();
 }
 
 void loop() {
   server.handleClient();
-  
-  // Pass any debug messages from the Mega straight to the PC monitor
-  if (MEGA_SERIAL.available()) {
-    //Serial.write(MEGA_SERIAL.read());
+
+  // Parse commands from the Mega (ONLINE/OFFLINE, finish/error acks).
+  while (MEGA_SERIAL.available()) {
+    char c = MEGA_SERIAL.read();
+    if (c == '\n') {
+      handleMegaLine(megaInBuf);
+      megaInBuf = "";
+    } else {
+      megaInBuf += c;
+    }
+  }
+
+  // Keep the Mega's displayed IP fresh even if it entered ESP32 mode after boot.
+  if (millis() - lastIpBroadcast > IP_BROADCAST_MS) {
+    sendIpToMega();
+    lastIpBroadcast = millis();
   }
 }

@@ -21,6 +21,12 @@ const int PIN_Z_DIR   = 13;
 const int PIN_NANO_ESTOP = A8; // Shared Nano e-stop line (Z limit / Y limit / overtemp), see uv_globals.h
 const int PIN_BUZZER = 9;      // Piezo buzzer: alerts operator that an ESP32-triggered print is staged and waiting on [Enter]
 
+// Spare pins on the bare header, immediately after btnBack (29): 30-37.
+// TODO confirm these against actual wiring before relying on them.
+const int PIN_ALERT_BUZZER = 30; // Attendant-facing "print incoming" / success chime
+const int PIN_VAC_RELAY_1  = 31; // Vacuum blower fan 1 (assumes active-HIGH relay driver)
+const int PIN_VAC_RELAY_2  = 32; // Vacuum blower fan 2 (assumes active-HIGH relay driver)
+
 const float Z_HOME_SWITCH_TO_PAPER_MM = 8.0f;
 const float Z_MAX_TO_CR_TOUCH_APPROACH_MM = 12.0f;
 
@@ -79,6 +85,20 @@ void buzzReady() {
   noTone(PIN_BUZZER);
 }
 
+// Three short high beeps: a print arrived and validated -- go seat paper on the vacuum bed.
+void buzzPrintIncoming() {
+  for (int i = 0; i < 3; i++) { tone(PIN_ALERT_BUZZER, 2500, 120); delay(180); }
+  noTone(PIN_ALERT_BUZZER);
+}
+
+// Rising three-note chime: print finished successfully.
+void buzzPrintSuccess() {
+  tone(PIN_ALERT_BUZZER, 1500, 150); delay(180);
+  tone(PIN_ALERT_BUZZER, 2000, 150); delay(180);
+  tone(PIN_ALERT_BUZZER, 2500, 250); delay(280);
+  noTone(PIN_ALERT_BUZZER);
+}
+
 // handleEmergencyStop() is defined in uv_print.cpp -- it needs PRINTHEAD_SERIAL to ask
 // the Nano which limit fired, so it lives alongside the other Nano UART helpers.
 
@@ -115,6 +135,10 @@ void setup() {
   pinMode(btnEnter.pin, INPUT_PULLUP);
   pinMode(btnBack.pin, INPUT_PULLUP);
   pinMode(PIN_BUZZER, OUTPUT);
+
+  pinMode(PIN_ALERT_BUZZER, OUTPUT);
+  pinMode(PIN_VAC_RELAY_1, OUTPUT); digitalWrite(PIN_VAC_RELAY_1, LOW);
+  pinMode(PIN_VAC_RELAY_2, OUTPUT); digitalWrite(PIN_VAC_RELAY_2, LOW);
 
 
   STEPS_PER_MM_X  = (MOTOR_STEPS_PER_REV * MICROSTEPS_X) / LEAD_MM_X;

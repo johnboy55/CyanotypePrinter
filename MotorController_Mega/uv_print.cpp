@@ -674,14 +674,16 @@ bool readFourRowsBy(RowSource &src, int visualStart, Image4x &img) {
 void countdown_1s_tenths(const char* label) {
   oledHeader(label);
   display.setCursor(0, 20); display.print("Starting in:");
-  display.display();
+  display.sendBuffer();
   for (int i = 10; i >= 0; --i) {
-    display.fillRect(0, 35, 128, 20, SSD1306_BLACK);
+    display.setDrawColor(0); display.drawBox(0, 35, 128, 20); display.setDrawColor(1);
     display.setCursor(20, 35);
-    display.setTextSize(2);
+    // Closest u8g2 stand-in for Adafruit GFX's setTextSize(2); may need retuning to fit
+    // the 20px-tall cleared box once you see it on the actual panel.
+    display.setFont(u8g2_font_ncenB14_tr);
     displayPrintf(display, "%d.%d s", i/10, i%10);
-    display.setTextSize(1);
-    display.display();
+    display.setFont(u8g2_font_6x10_tf);
+    display.sendBuffer();
     delay(100);
   }
 }
@@ -701,7 +703,7 @@ void printEntireBMP(const String &path) {
   BMPMeta meta;
   if (!loadBMPMeta(path, meta)) {
     oledHeader("BMP"); display.setCursor(0,20); display.print("Header error");
-    display.setCursor(0,32); display.print(path); display.display(); delay(1200);
+    display.setCursor(0,32); display.print(path); display.sendBuffer(); delay(1200);
     return;
   }
 
@@ -713,7 +715,7 @@ void printEntireBMP(const String &path) {
   displayPrintf(display,"W=%d  H=%d", meta.W, meta.H);
   display.setCursor(0, 40); displayPrintf(display,"%d slices (4 rows ea.)", totalSlices);
   display.setCursor(0, 54); display.print("[Enter] Start  [-] Back");
-  display.display();
+  display.sendBuffer();
 
   while (true) {
     if (checkEStop()) return;
@@ -731,7 +733,7 @@ void printEntireBMP(const String &path) {
       oledHeader("BMP");
       display.setCursor(0, 20);
       display.print("Read error at slice ");
-      display.print(slice+1); display.display(); delay(1200);
+      display.print(slice+1); display.sendBuffer(); delay(1200);
       return;
     }
 
@@ -740,7 +742,7 @@ void printEntireBMP(const String &path) {
     display.setCursor(0, 30);
     displayPrintf(display,"Slice %d/%d", slice+1, totalSlices);
     display.setCursor(0, 42); displayPrintf(display,"Rows %d..%d", visualStart, min(meta.H-1, visualStart+3));
-    display.display();
+    display.sendBuffer();
     const bool forward = (slice % 2 == 0);
     doPrintBMPSliceSerpentine(img, forward, false, true);
     if (slice < totalSlices - 1) {
@@ -765,7 +767,7 @@ void printEntireBMP(const String &path) {
 
   oledHeader("Print");
   display.setCursor(0, 22); display.print("Entire image done.");
-  display.display();
+  display.sendBuffer();
   delay(1200);
 }
 // The validated 4-pass interlaced print sequence -- shared by SD-file prints and
@@ -774,7 +776,7 @@ void printEntireBMP(const String &path) {
 static void printFromRowSource(RowSource &src, const String &label, bool skipStartPrompt) {
   if (src.width <= 0 || src.height <= 0) {
     oledHeader("Print Error"); display.setCursor(0, 20);
-    display.print("Bad image"); display.display(); delay(2000);
+    display.print("Bad image"); display.sendBuffer(); delay(2000);
     return;
   }
 
@@ -790,7 +792,7 @@ static void printFromRowSource(RowSource &src, const String &label, bool skipSta
     displayPrintf(display,"W=%d  H=%d", src.width, src.height);
     display.setCursor(0, 40); displayPrintf(display,"%d passes (1 rows ea.)", totalSlices);
     display.setCursor(0, 54); display.print("[Enter] Start  [-] Back");
-    display.display();
+    display.sendBuffer();
 
     while (true) {
       if (checkEStop()) return;
@@ -811,7 +813,7 @@ static void printFromRowSource(RowSource &src, const String &label, bool skipSta
       oledHeader("Print Error");
       display.setCursor(0, 16); display.print("Read failed");
       display.setCursor(0, 28); display.print("Slice: "); display.print(slice);
-      display.display(); delay(2000);
+      display.sendBuffer(); delay(2000);
       return;
     }
 
@@ -824,7 +826,7 @@ static void printFromRowSource(RowSource &src, const String &label, bool skipSta
     display.setCursor(70, 12);
     if (tempC > -100) displayPrintf(display, "T:%dC", tempC); else display.print("T:--");
     display.setCursor(0, 24); display.print(label);
-    display.display();
+    display.sendBuffer();
 
     const bool forward = (slice % 2 == 0);
     doPrintBMPSliceSerpentine(img, forward, true, src.wantsInvert);
@@ -840,7 +842,7 @@ static void printFromRowSource(RowSource &src, const String &label, bool skipSta
 
   oledHeader("Print");
   display.setCursor(0, 22); display.print("Entire image done.");
-  display.display();
+  display.sendBuffer();
   delay(1200);
 }
 
@@ -848,7 +850,7 @@ void printEntireBMP_4by(const String &path) {
   BMPFileRowSource src;
   if (!src.open(path)) {
     oledHeader("BMP ERROR"); display.setCursor(0,20); display.print("Header error");
-    display.display(); delay(2000);
+    display.sendBuffer(); delay(2000);
     return;
   }
   printFromRowSource(src, path, false);

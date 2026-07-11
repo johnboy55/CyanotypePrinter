@@ -6,7 +6,7 @@
 // --- Actual Global Definitions ---
 Config CFG; 
 SdFat SD;
-Adafruit_SSD1306 display(128, 64, &Wire, -1);
+OledDisplay display(U8G2_R0, /*reset=*/ U8X8_PIN_NONE);
 
 const int PIN_SD_CS = 53;     
 const int PIN_STEP = 2;       
@@ -147,8 +147,12 @@ void setup() {
   OFFSET_PIXELS   = max(1, (int)(LED_SPACING_MM / MM_PER_PIXEL + 0.5f));
 
   Wire.begin();
-  display.begin(SSD1306_SWITCHCAPVCC, 0x3C); 
-  display.clearDisplay(); display.display();
+  display.begin();
+  // Match Adafruit_GFX's "y = top of glyph" convention so every existing setCursor(x,y)
+  // call in the menu code keeps working unchanged instead of landing on the baseline.
+  display.setFontPosTop();
+  display.setFont(u8g2_font_6x10_tf);
+  display.clearBuffer(); display.sendBuffer();
 
   SPI.begin();
   if (SD.begin(PIN_SD_CS)) {

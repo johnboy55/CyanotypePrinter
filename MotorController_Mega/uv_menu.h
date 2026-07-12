@@ -2,7 +2,7 @@
 #define UV_MENU_H
 #include "uv_globals.h"
 
-void displayPrintf(Adafruit_SSD1306 &disp, const char *fmt, ...);
+void displayPrintf(OledDisplay &disp, const char *fmt, ...);
 bool readButton(Btn &b);
 bool buttonHeld(const Btn &b);
 void oledHeader(const char* title);

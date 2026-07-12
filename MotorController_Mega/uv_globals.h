@@ -5,12 +5,17 @@
 #include <Wire.h>
 #include <SPI.h>
 #include <SdFat.h>
-#include <Adafruit_GFX.h>  
-#include <Adafruit_SSD1306.h>
+#include <U8g2lib.h>
 #include <stdarg.h>
 #include <stdio.h>
 #include <PinChangeInterrupt.h>
 #include "uv_types.h"
+
+// 2.42" SSD1309 128x64, hardware I2C, full-frame-buffer mode (matches the old
+// Adafruit_SSD1306 "draw everything then push once" usage pattern). If the picture
+// comes out mirrored/garbled on your specific panel, try the NONAME2 variant instead --
+// SSD1309 clone boards commonly need one or the other depending on their init sequence.
+typedef U8G2_SSD1309_128X64_NONAME0_F_HW_I2C OledDisplay;
 
 #define FW_VERSION "UV Controller v2.2.0"
 
@@ -22,7 +27,7 @@
 
 // --- Globals ---
 extern SdFat SD;
-extern Adafruit_SSD1306 display;
+extern OledDisplay display;
 
 extern const int PIN_SD_CS;
 extern const int PIN_STEP, PIN_DIR, PIN_EN;

@@ -1,0 +1,311 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Pixel Art to JSON Converter</title>
+    <style>
+        body {
+            font-family: system-ui, -apple-system, sans-serif;
+            background-color: #f4f4f9;
+            color: #333;
+            margin: 0;
+            padding: 20px;
+            display: flex;
+            height: 100vh;
+            box-sizing: border-box;
+            gap: 20px;
+        }
+        .panel {
+            background: white;
+            border-radius: 8px;
+            padding: 20px;
+            box-shadow: 0 4px 6px rgba(0,0,0,0.1);
+            display: flex;
+            flex-direction: column;
+        }
+        #left-panel {
+            flex: 1;
+            overflow: hidden;
+        }
+        #right-panel {
+            flex: 1;
+        }
+        .controls {
+            display: flex;
+            gap: 15px;
+            margin-bottom: 15px;
+            align-items: center;
+            flex-wrap: wrap;
+        }
+        #canvas-container {
+            flex: 1;
+            overflow: auto;
+            border: 1px solid #ccc;
+            background: #e0e0e0;
+            position: relative;
+            display: flex;
+            align-items: flex-start;
+            justify-content: flex-start;
+        }
+        canvas {
+            cursor: crosshair;
+        }
+        textarea {
+            width: 100%;
+            flex: 1;
+            font-family: monospace;
+            font-size: 14px;
+            padding: 10px;
+            border: 1px solid #ccc;
+            border-radius: 4px;
+            resize: none;
+            box-sizing: border-box;
+        }
+        button, input[type="file"], select {
+            padding: 8px 12px;
+            font-size: 14px;
+            border: 1px solid #ccc;
+            border-radius: 4px;
+            background: #fff;
+            cursor: pointer;
+        }
+        button {
+            background: #007bff;
+            color: white;
+            border: none;
+            font-weight: bold;
+        }
+        button:hover {
+            background: #0056b3;
+        }
+        label {
+            font-size: 14px;
+            font-weight: bold;
+        }
+    </style>
+</head>
+<body>
+
+    <div id="left-panel" class="panel">
+        <div class="controls">
+            <input type="file" id="imageLoader" accept="image/png, image/jpeg">
+            
+            <label for="scaleSlider">Scale:</label>
+            <input type="range" id="scaleSlider" min="5" max="40" value="20">
+            
+            <label for="sizeSelect">Size:</label>
+            <select id="sizeSelect">
+                <option value="8x8">8 x 8</option>
+                <option value="8x16">8 x 16</option>
+                <option value="16x16">16 x 16</option>
+            </select>
+            
+            <button id="processBtn">Process Selection</button>
+        </div>
+        <div id="canvas-container">
+            <canvas id="editorCanvas"></canvas>
+        </div>
+    </div>
+
+    <div id="right-panel" class="panel">
+        <div class="controls">
+            <label>JSON Output</label>
+            <button id="downloadBtn" style="margin-left: auto; background-color: #28a745;">Download .txt</button>
+        </div>
+        <textarea id="output" readonly></textarea>
+    </div>
+
+    <script>
+        const imageLoader = document.getElementById('imageLoader');
+        const scaleSlider = document.getElementById('scaleSlider');
+        const sizeSelect = document.getElementById('sizeSelect');
+        const processBtn = document.getElementById('processBtn');
+        const downloadBtn = document.getElementById('downloadBtn');
+        const canvas = document.getElementById('editorCanvas');
+        const ctx = canvas.getContext('2d');
+        const output = document.getElementById('output');
+
+        let img = new Image();
+        let scale = parseInt(scaleSlider.value);
+        let selWidth = 8;
+        let selHeight = 8;
+        let selX = 0;
+        let selY = 0;
+        let isLocked = false;
+
+
+        // Data storage
+        let presets = {};
+
+        // Update JSON output display
+        function updateOutput() {
+            let jsonString = "const presets = {\n";
+            const keys = Object.keys(presets);
+            keys.forEach((key, index) => {
+                const p = presets[key];
+                jsonString += `    '${key}': { width: ${p.width}, height: ${p.height}, pixels: [${p.pixels.join(',')}] }`;
+                jsonString += (index < keys.length - 1) ? ",\n" : "\n";
+            });
+            jsonString += "};";
+            output.value = jsonString;
+        }
+
+        // Initialize output
+        updateOutput();
+
+        // Handle Image Upload
+        imageLoader.addEventListener('change', function(e) {
+            const reader = new FileReader();
+            reader.onload = function(event) {
+                img.onload = function() {
+                    selX = 0;
+                    selY = 0;
+                    draw();
+                }
+                img.src = event.target.result;
+            }
+            reader.readAsDataURL(e.target.files[0]);
+        });
+
+        // Handle Scale Change
+        scaleSlider.addEventListener('input', function() {
+            scale = parseInt(this.value);
+            draw();
+        });
+
+        // Handle Size Selection
+        sizeSelect.addEventListener('change', function() {
+            const dims = this.value.split('x');
+            selWidth = parseInt(dims[0]);
+            selHeight = parseInt(dims[1]);
+            draw();
+        });
+
+        // Handle Canvas Hover (Moving Selection)
+        canvas.addEventListener('mousemove', function(e) {
+            if (!img.src || isLocked) return; // Abort if no image or if locked
+            
+            const rect = canvas.getBoundingClientRect();
+            const hoverX = e.clientX - rect.left;
+            const hoverY = e.clientY - rect.top;
+            
+            selX = Math.floor(hoverX / scale);
+            selY = Math.floor(hoverY / scale);
+            
+            if (selX + selWidth > img.width) selX = Math.max(0, img.width - selWidth);
+            if (selY + selHeight > img.height) selY = Math.max(0, img.height - selHeight);
+            
+            draw();
+        });
+
+        // Handle Canvas Clicking (Lock/Unlock Selection)
+        canvas.addEventListener('mousedown', function() {
+            if (!img.src) return;
+            isLocked = !isLocked; // Toggle the lock state on click
+            draw(); // Redraw to update the box color
+        });
+        
+        // Draw Image, Grid, and Selection
+        function draw() {
+            if (!img.src) return;
+            
+            canvas.width = img.width * scale;
+            canvas.height = img.height * scale;
+            
+            // Disable smoothing for pixelated look
+            ctx.imageSmoothingEnabled = false;
+            
+            // Draw image scaled up
+            ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
+            
+            // Draw dark grid lines
+            ctx.strokeStyle = "rgba(0, 0, 0, 0.4)";
+            ctx.lineWidth = 1;
+            ctx.beginPath();
+            for (let x = 0; x <= canvas.width; x += scale) {
+                ctx.moveTo(x, 0);
+                ctx.lineTo(x, canvas.height);
+            }
+            for (let y = 0; y <= canvas.height; y += scale) {
+                ctx.moveTo(0, y);
+                ctx.lineTo(canvas.width, y);
+            }
+            ctx.stroke();
+
+            // Draw selection box
+            ctx.strokeStyle = "rgba(255, 0, 0, 0.9)";
+            ctx.lineWidth = 3;
+            ctx.strokeRect(selX * scale, selY * scale, selWidth * scale, selHeight * scale);
+            
+            // Highlight selection area slightly
+            ctx.fillStyle = "rgba(255, 255, 255, 0.2)";
+            ctx.fillRect(selX * scale, selY * scale, selWidth * scale, selHeight * scale);
+        }
+
+        // Process Selection
+        processBtn.addEventListener('click', function() {
+            if (!img.src) {
+                alert("Please upload an image first.");
+                return;
+            }
+
+            const name = prompt("Enter a name for this sprite:");
+            if (!name) return; // Cancelled or empty
+
+            // We need to read the original pixels.
+            // Create an offscreen canvas at original 1:1 scale
+            const offCanvas = document.createElement('canvas');
+            offCanvas.width = img.width;
+            offCanvas.height = img.height;
+            const offCtx = offCanvas.getContext('2d');
+            offCtx.drawImage(img, 0, 0);
+
+            const imageData = offCtx.getImageData(selX, selY, selWidth, selHeight).data;
+            const pixels = [];
+
+            for (let i = 0; i < imageData.length; i += 4) {
+                let r = imageData[i];
+                let g = imageData[i+1];
+                let b = imageData[i+2];
+                let a = imageData[i+3];
+
+                if (a === 0) {
+                    pixels.push(0); // Transparent = 0
+                } else {
+                    // Convert to grayscale: standard luminosity formula
+                    let brightness = (0.299 * r + 0.587 * g + 0.114 * b);
+                    // Map brightness (0=black, 255=white) to a 0-15 scale.
+                    // Assuming your format treats 15 as solid ink (black/dark) and 0 as empty (white).
+                    let val = Math.round(((255 - brightness) / 255) * 15);
+                    pixels.push(val);
+                }
+            }
+
+            // Save to presets
+            presets[name] = {
+                width: selWidth,
+                height: selHeight,
+                pixels: pixels
+            };
+
+            updateOutput();
+        });
+
+        // Download Text File
+        downloadBtn.addEventListener('click', function() {
+            if (Object.keys(presets).length === 0) {
+                alert("No presets to download yet. Process some sprites first!");
+                return;
+            }
+            const blob = new Blob([output.value], { type: "text/plain" });
+            const url = URL.createObjectURL(blob);
+            const a = document.createElement('a');
+            a.href = url;
+            a.download = "presets.txt";
+            a.click();
+            URL.revokeObjectURL(url);
+        });
+    </script>
+</body>
+</html>

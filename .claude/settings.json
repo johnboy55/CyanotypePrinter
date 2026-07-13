@@ -1,0 +1,11 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(grep -rn '\"T\\\\\\\\n\"\\\\|queryTemp\\\\|PRINTHEAD_SERIAL.print\\(\"T' *.cpp *.h *.ino)",
+      "Bash(python3 -c ' *)",
+      "WebSearch",
+      "WebFetch(domain:docs.cirkitdesigner.com)",
+      "WebFetch(domain:manuals.plus)"
+    ]
+  }
+}

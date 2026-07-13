@@ -2,7 +2,7 @@
 #include "uv_print.h" // Since menus call motion/print functions
 #include "uv_sd.h"    // Since menus call SD loaders
 
-void displayPrintf(Adafruit_SSD1306 &disp, const char *fmt, ...) {
+void displayPrintf(OledDisplay &disp, const char *fmt, ...) {
   char buf[64]; va_list args; va_start(args, fmt);
   vsnprintf(buf, sizeof(buf), fmt, args); va_end(args);
   disp.print(buf);
@@ -30,24 +30,24 @@ bool buttonHeld(const Btn &b) {
 }
 
 void oledHeader(const char* title) {
-  display.clearDisplay(); display.setTextSize(1);
-  display.setTextColor(SSD1306_WHITE); display.setCursor(0,0);
-  display.print(title); display.drawLine(0,10,127,10,SSD1306_WHITE);
+  display.clearBuffer(); display.setFont(u8g2_font_6x10_tf);
+  display.setDrawColor(1); display.setCursor(0,0);
+  display.print(title); display.drawLine(0,10,127,10);
 }
 
 void drawStatusRow(const bool ledOn[4], const String &rightText) {
-  display.fillRect(0, 52, 128, 12, SSD1306_BLACK); display.setTextSize(1); display.setTextColor(SSD1306_WHITE);
+  display.setDrawColor(0); display.drawBox(0, 52, 128, 12); display.setDrawColor(1);
   int x = 0, y = 54;
   for (int i=0; i<4; ++i) {
-    if (ledOn[i]) { display.fillRect(x, y-1, 14, 10, SSD1306_WHITE);
-    display.setTextColor(SSD1306_BLACK); } 
-    else { display.drawRect(x, y-1, 14, 10, SSD1306_WHITE); }
+    if (ledOn[i]) { display.drawBox(x, y-1, 14, 10);
+    display.setDrawColor(0); }
+    else { display.drawFrame(x, y-1, 14, 10); }
     display.setCursor(x+3, y); display.print(i+1);
-    display.setTextColor(SSD1306_WHITE); x += 16;
+    display.setDrawColor(1); x += 16;
   }
-  int16_t bx,by; uint16_t bw,bh; display.getTextBounds(rightText, 0, y, &bx, &by, &bw, &bh);
+  uint16_t bw = display.getStrWidth(rightText.c_str());
   int rx = 128 - (int)bw - 2; if (rx < 68) rx = 68;
-  display.setCursor(rx, y); display.print(rightText); display.display();
+  display.setCursor(rx, y); display.print(rightText); display.sendBuffer();
 }
 
 bool listFilesToOLED(const char* folder, const char* extFilter, String &picked) {
@@ -56,7 +56,7 @@ bool listFilesToOLED(const char* folder, const char* extFilter, String &picked) 
     oledHeader("SD error");
     display.setCursor(0, 20); display.print("Missing folder:");
     display.setCursor(0, 30); display.print(folder);
-    display.display(); delay(1500);
+    display.sendBuffer(); delay(1500);
     if (dir) dir.close();
     return false;
   }
@@ -84,7 +84,7 @@ bool listFilesToOLED(const char* folder, const char* extFilter, String &picked) 
     display.setCursor(0, 20); display.print("Folder:");
     display.setCursor(0, 30); display.print(folder);
     display.setCursor(0, 45); display.print("No matching files.");
-    display.display(); delay(1500);
+    display.sendBuffer(); delay(1500);
     return false;
   }
 
@@ -93,12 +93,13 @@ bool listFilesToOLED(const char* folder, const char* extFilter, String &picked) 
     oledHeader("Select file");
     display.setCursor(0, 20); display.print(folder);
     display.setCursor(0, 35); display.print(files[idx]);
-    display.setCursor(0, 55); display.print("[+] next  [-] prev  [Enter] ok");
-    display.display();
+    display.setCursor(0, 55); display.print("[+/-] move [Ent] ok [Back] x");
+    display.sendBuffer();
 
     if (readButton(btnPlus))  { idx = (idx + 1) % count; }
     if (readButton(btnMinus)) { idx = (idx - 1 + count) % count; }
     if (readButton(btnEnter)) { picked = String(folder) + "/" + files[idx]; return true; }
+    if (readButton(btnBack))  { return false; }
     delay(10);
   }
 }
@@ -120,19 +121,14 @@ void menuXCtrl() {
         display.setCursor(0, 18); display.print("Distance: ");
         display.print(distanceMM, 1); display.print(" mm");
         display.setCursor(0, 34); display.print("[+/-] \xC2\xB1 5mm");
-        display.setCursor(0, 46); display.print("[Enter] Direction   Hold [-] back");
-        display.display();
+        display.setCursor(0, 46); display.print("[Enter] Direction   [Back] exit");
+        display.sendBuffer();
         redraw = false;
       }
 
       if (readButton(btnPlus))  { distanceMM += INC_MM; if (distanceMM > 10000.0f) distanceMM = 10000.0f; redraw = true; }
-      if (readButton(btnMinus)) {
-        unsigned long t0 = millis();
-        while (buttonHeld(btnMinus)) { delay(5); if (millis()-t0>600) { exitScreen = true; break; } }
-        if (exitScreen) break;
-        distanceMM -= INC_MM; if (distanceMM < 0.0f) distanceMM = 0.0f;
-        redraw = true;
-      }
+      if (readButton(btnMinus)) { distanceMM -= INC_MM; if (distanceMM < 0.0f) distanceMM = 0.0f; redraw = true; }
+      if (readButton(btnBack))  { exitScreen = true; break; }
       if (readButton(btnEnter)) break;
       delay(10);
     }
@@ -146,8 +142,8 @@ void menuXCtrl() {
         display.setCursor(0, 18); display.print("Move: ");
         display.print(forward ? "Forward" : "Backward");
         display.setCursor(0, 34); display.print("[+/-] Toggle");
-        display.setCursor(0, 46); display.print("[Enter] Go      Hold [-] back");
-        display.display();
+        display.setCursor(0, 46); display.print("[Enter] Go      [Back] exit");
+        display.sendBuffer();
         redraw = false;
       }
 
@@ -160,6 +156,7 @@ void menuXCtrl() {
           drawStatusRow(none, rt);
           xMoveMM(distanceMM, forward);
           digitalWrite(PIN_EN, HIGH);
+          cancelRequested = false;
         }
         oledHeader("X Ctrl");
         display.setCursor(0, 30); display.print("Done: ");
@@ -167,15 +164,11 @@ void menuXCtrl() {
         display.print(distanceMM,1); display.print(" mm");
         bool none2[4] = {false,false,false,false};
         drawStatusRow(none2, "Ready");
-        display.display();
+        display.sendBuffer();
         delay(800);
         break;
       }
-      if (buttonHeld(btnMinus)) {
-        unsigned long t0 = millis();
-        while (buttonHeld(btnMinus)) { delay(5); if (millis()-t0>600) { exitScreen = true; break; } }
-        if (exitScreen) break;
-      }
+      if (readButton(btnBack)) { exitScreen = true; break; }
       delay(10);
     }
   }
@@ -194,19 +187,14 @@ void menuZCtrl() {
         display.setCursor(0, 18); display.print("Distance: ");
         display.print(distanceMM, 1); display.print(" mm");
         display.setCursor(0, 34); display.print("[+/-] \xC2\xB1 0.1mm");
-        display.setCursor(0, 46); display.print("[Enter] Direction   Hold [-] back");
-        display.display();
+        display.setCursor(0, 46); display.print("[Enter] Direction   [Back] exit");
+        display.sendBuffer();
         redraw = false;
       }
 
       if (readButton(btnPlus))  { distanceMM += INC_MM; if (distanceMM > 100.0f) distanceMM = 100.0f; redraw = true; }
-      if (readButton(btnMinus)) {
-        unsigned long t0 = millis();
-        while (buttonHeld(btnMinus)) { delay(5); if (millis()-t0>600) { exitScreen = true; break; } }
-        if (exitScreen) break;
-        distanceMM -= INC_MM; if (distanceMM < 0.1f) distanceMM = 0.1f;
-        redraw = true;
-      }
+      if (readButton(btnMinus)) { distanceMM -= INC_MM; if (distanceMM < 0.1f) distanceMM = 0.1f; redraw = true; }
+      if (readButton(btnBack))  { exitScreen = true; break; }
       if (readButton(btnEnter)) break;
       delay(10);
     }
@@ -221,8 +209,8 @@ void menuZCtrl() {
         display.print(down ? "Down" : "Up");
         display.setCursor(0, 34); display.print("Distance: ");
         display.print(distanceMM, 1); display.print(" mm");
-        display.setCursor(0, 46); display.print("[+/-] Toggle   [Enter] Go");
-        display.display();
+        display.setCursor(0, 46); display.print("[+/-] Toggle [Ent] Go [Back] x");
+        display.sendBuffer();
         redraw = false;
       }
 
@@ -236,19 +224,17 @@ void menuZCtrl() {
           drawStatusRow(none, rt);
           moveZStepsRelative(down ? steps : -steps);
           digitalWrite(PIN_EN, HIGH);
+          cancelRequested = false;
         }
         oledHeader("Z Ctrl");
         display.setCursor(0, 30); display.print("Done");
         bool none2[4] = {false,false,false,false};
         drawStatusRow(none2, "Ready");
-        display.display();
+        display.sendBuffer();
         delay(800);
         return;
       }
-      if (buttonHeld(btnMinus)) {
-        unsigned long t0 = millis();
-        while (buttonHeld(btnMinus)) { delay(5); if (millis()-t0>600) return; }
-      }
+      if (readButton(btnBack)) return;
       delay(10);
     }
   }
@@ -256,24 +242,25 @@ void menuZCtrl() {
 
 void menuZCalib() {
   while (true) {
-    if (emergencyStopTriggered) handleEmergencyStop();
+    if (checkEStop()) return;
     oledHeader("Z Calibration");
     display.setCursor(0, 18); display.print("> Home Z");
-    display.setCursor(0, 46); display.print("Hold [-] to exit");
-    display.display();
+    display.setCursor(0, 46); display.print("[Back] to exit");
+    display.sendBuffer();
 
     if (readButton(btnEnter)) {
       oledHeader("Z Homing");
       display.setCursor(0, 30); display.print("Please wait...");
-      display.display();
+      display.sendBuffer();
       homeZ();
+      cancelRequested = false;
       oledHeader("Z Homed");
       display.setCursor(0, 30); display.print("Done");
-      display.display();
+      display.sendBuffer();
       delay(800);
       return;
     }
-    if (buttonHeld(btnMinus)) return;
+    if (readButton(btnBack)) return;
     delay(10);
   }
 }
@@ -283,14 +270,14 @@ void menuMotor() {
   const int ITEMS = 4;
 
   while (true) {
-    if (emergencyStopTriggered) handleEmergencyStop();
+    if (checkEStop()) return;
     oledHeader("Motor Control");
     display.setCursor(0, 16); display.print(sel==0?"> ":"  "); display.print("X Move");
     display.setCursor(0, 26); display.print(sel==1?"> ":"  "); display.print("Y Move");
     display.setCursor(0, 36); display.print(sel==2?"> ":"  "); display.print("Z Move");
     display.setCursor(0, 46); display.print(sel==3?"> ":"  "); display.print("Z Home");
-    display.setCursor(0, 56); display.print("[+/-] Select  [Enter] Go");
-    display.display();
+    display.setCursor(0, 56); display.print("[+/-]Sel [Ent]Go [Back]x");
+    display.sendBuffer();
 
     if (readButton(btnPlus))  sel = (sel + 1) % ITEMS;
     if (readButton(btnMinus)) sel = (sel - 1 + ITEMS) % ITEMS;
@@ -300,7 +287,7 @@ void menuMotor() {
       else if (sel == 2) menuZCtrl();
       else if (sel == 3) menuZCalib();
     }
-    if (buttonHeld(btnMinus)) return;
+    if (readButton(btnBack)) return;
     delay(10);
   }
 }
@@ -318,14 +305,15 @@ void menuYCtrl() {
       display.setCursor(0, 16); display.print("Both: "); display.print(baseMM,1); display.print(" mm");
       display.setCursor(0, 28); display.print("Trim R: "); display.print(trimR,1); display.print(" mm");
       display.setCursor(0, 44); display.print("[+] +5mm / [-] -5mm");
-      display.setCursor(0, 56); display.print("[Enter] Dir / Hold [-] back");
-      display.display();
+      display.setCursor(0, 56); display.print("[Enter] Dir / [Back] exit");
+      display.sendBuffer();
       redraw = false;
     }
 
     if (readButton(btnPlus))  { baseMM += INC_BASE; if (baseMM > 10000.0f) baseMM = 10000.0f; redraw = true; }
-    if (readButton(btnMinus)) { unsigned long t0 = millis(); while (buttonHeld(btnMinus)) { delay(5); if (millis()-t0>600) return; } baseMM -= INC_BASE; if (baseMM < 0.0f) baseMM = 0.0f; redraw = true; }
+    if (readButton(btnMinus)) { baseMM -= INC_BASE; if (baseMM < 0.0f) baseMM = 0.0f; redraw = true; }
     if (buttonHeld(btnPlus)) { unsigned long t0 = millis(); while (buttonHeld(btnPlus)) { delay(5); if (millis()-t0>600) { trimR += INC_TRIM; redraw = true; break; } } }
+    if (readButton(btnBack))  return;
     if (readButton(btnEnter)) break;
     delay(10);
   }
@@ -338,8 +326,8 @@ void menuYCtrl() {
       display.setCursor(0, 16); display.print("Move: "); display.print(forward ? "Forward" : "Backward");
       display.setCursor(0, 28); display.print("Both "); display.print(baseMM,1); display.print("mm");
       display.setCursor(0, 38); display.print("TrimR "); display.print(trimR,1); display.print("mm");
-      display.setCursor(0, 56); display.print("[+/-] Toggle  [Enter] Go  (-hold)Back");
-      display.display();
+      display.setCursor(0, 56); display.print("[+/-] Toggle [Ent] Go [Back] x");
+      display.sendBuffer();
       redraw = false;
     }
 
@@ -349,14 +337,15 @@ void menuYCtrl() {
       String rt = String("Y ") + (forward?"+":"-") + String(baseMM,1) + " / R+" + String(trimR,1);
       drawStatusRow(none, rt);
       yMoveSkewMM(baseMM, trimR, forward);
+      cancelRequested = false;
       oledHeader("Y Ctrl");
       display.setCursor(0, 30); display.print("Done");
       drawStatusRow(none, "Ready");
-      display.display();
+      display.sendBuffer();
       delay(900);
       return;
     }
-    if (buttonHeld(btnMinus)) { unsigned long t0 = millis(); while (buttonHeld(btnMinus)) { delay(5); if (millis()-t0>600) return; } }
+    if (readButton(btnBack)) return;
     delay(10);
   }
 }
@@ -402,8 +391,8 @@ void menuFileBrowser() {
       display.print(ents[idx].name);
     }
     display.setCursor(0, 56);
-    display.print("[+/-] Move  [Enter] Open  (-hold)Up  (+hold)Exit");
-    display.display();
+    display.print("[+/-] Move  [Enter] Open  [Back] Up/Exit");
+    display.sendBuffer();
 
     if (readButton(btnPlus))  { sel = (sel + 1); if (sel >= n) sel = max(0, n-1); }
     if (readButton(btnMinus)) { sel = (sel - 1); if (sel < 0) sel = 0; }
@@ -418,29 +407,17 @@ void menuFileBrowser() {
         display.setCursor(0, 32); display.print("Size: ");
         display.print((unsigned long)ents[sel].size); display.print(" B");
         display.setCursor(0, 46); display.print("Press Enter...");
-        display.display();
+        display.sendBuffer();
         while (!readButton(btnEnter)) delay(10);
       }
     }
-    if (buttonHeld(btnMinus)) {
-      unsigned long t0 = millis();
-      while (buttonHeld(btnMinus)) {
-        delay(5);
-        if (millis()-t0>600) {
-          if (cwd != "/") {
-            int last = cwd.lastIndexOf('/');
-            cwd = (last <= 0) ? "/" : cwd.substring(0, last);
-            sel = 0;
-          }
-          break;
-        }
-      }
-    }
-    if (buttonHeld(btnPlus)) {
-      unsigned long t1 = millis();
-      while (buttonHeld(btnPlus)) {
-        delay(5);
-        if (millis()-t1>600) return;
+    if (readButton(btnBack)) {
+      if (cwd != "/") {
+        int last = cwd.lastIndexOf('/');
+        cwd = (last <= 0) ? "/" : cwd.substring(0, last);
+        sel = 0;
+      } else {
+        return;
       }
     }
     delay(10);
@@ -448,31 +425,70 @@ void menuFileBrowser() {
 }
 
 
+void menuCalibPattern() {
+  float maxTimeSec = 2.0f;
+  const float INC_SEC = 0.25f;
+  bool redraw = true;
+
+  while (true) {
+    if (redraw) {
+      oledHeader("Calib Pattern");
+      display.setCursor(0, 18); display.print("Max time: ");
+      display.print(maxTimeSec, 2); display.print(" s");
+      display.setCursor(0, 34); display.print("[+/-] \xC2\xB1 0.25s");
+      display.setCursor(0, 46); display.print("[Enter] Run   [Back] exit");
+      display.sendBuffer();
+      redraw = false;
+    }
+
+    if (readButton(btnPlus))  { maxTimeSec += INC_SEC; if (maxTimeSec > 5.0f) maxTimeSec = 5.0f; redraw = true; }
+    if (readButton(btnMinus)) { maxTimeSec -= INC_SEC; if (maxTimeSec < 0.1f) maxTimeSec = 0.1f; redraw = true; }
+    if (readButton(btnBack))  return;
+    if (readButton(btnEnter)) {
+      oledHeader("Calib Pattern");
+      display.setCursor(0, 20); display.print("Running...");
+      display.sendBuffer();
+      printCalibrationPattern(maxTimeSec);
+      cancelRequested = false;
+      oledHeader("Calib Pattern");
+      display.setCursor(0, 20); display.print("Done");
+      display.sendBuffer();
+      delay(900);
+      return;
+    }
+    delay(10);
+  }
+}
+
 void menuCalib() {
   int sub = 0;
+  const int SUB_ITEMS = 3;
   while (true) {
-    if (emergencyStopTriggered) handleEmergencyStop();
+    if (checkEStop()) return;
     oledHeader("Calibration");
     display.setCursor(0, 20); display.print(sub == 0 ? "> " : "  "); display.print("Fire LED");
     display.setCursor(0, 30); display.print(sub == 1 ? "> " : "  "); display.print("Load LUT");
-    display.setCursor(0, 56); display.print("[+/-] Move  [Ent] Select");
-    display.display();
+    display.setCursor(0, 40); display.print(sub == 2 ? "> " : "  "); display.print("Print Pattern");
+    display.setCursor(0, 56); display.print("[+/-]Sel [Ent]Go [Back]x");
+    display.sendBuffer();
 
-    if (readButton(btnPlus))  sub = (sub + 1) % 2;
-    if (readButton(btnMinus)) sub = (sub - 1 + 2) % 2;
+    if (readButton(btnPlus))  sub = (sub + 1) % SUB_ITEMS;
+    if (readButton(btnMinus)) sub = (sub - 1 + SUB_ITEMS) % SUB_ITEMS;
+    if (readButton(btnBack))  return;
     if (readButton(btnEnter)) {
+      if (sub == 2) { menuCalibPattern(); continue; }
       if (sub == 0) {
         int step = 0;
         while (true) {
-          if (emergencyStopTriggered) handleEmergencyStop();
+          if (checkEStop()) return;
           oledHeader("Calib Fire");
           display.setCursor(0, 20); displayPrintf(display, "Fire LED %d", step + 1);
-          display.setCursor(0, 50); display.print("[+/-] Sel  [Ent] Fire");
-          display.display();
+          display.setCursor(0, 50); display.print("[+/-]Sel [Ent]Fire [Back]x");
+          display.sendBuffer();
           if (readButton(btnPlus)) { step++; if (step > 3) step = 0; }
           if (readButton(btnMinus)) { step--; if (step < 0) step = 3; }
-          if (readButton(btnEnter)) { uint32_t dur[4] = {0,0,0,0}; dur[step] = 1000000; sendBatchToPrinthead(dur); waitForPrinthead(); }
-          if (buttonHeld(btnMinus)) { unsigned long t0 = millis(); while (buttonHeld(btnMinus)) { delay(5); if (millis()-t0 > 600) break; } return; }
+          if (readButton(btnEnter)) { uint32_t dur[4] = {0,0,0,0}; dur[step] = 1000000; sendBatchToPrinthead(dur); waitForPrinthead(); cancelRequested = false; }
+          if (readButton(btnBack)) return;
           delay(10);
         }
       } else {
@@ -482,7 +498,7 @@ void menuCalib() {
           oledHeader("Load LUT");
           display.setCursor(0, 20); display.print(ok ? "Loaded:" : "Failed:");
           display.setCursor(0, 30); display.print(picked);
-          display.display();
+          display.sendBuffer();
           delay(900);
         }
       }
@@ -496,8 +512,8 @@ void testSerialRelay() {
   oledHeader("Serial Relay");
   display.setCursor(0, 20); display.print("Passthrough Active");
   display.setCursor(0, 35); display.print("PC <---> Nano");
-  display.setCursor(0, 54); display.print("Hold [-] to exit");
-  display.display();
+  display.setCursor(0, 54); display.print("[Back] to exit");
+  display.sendBuffer();
 
   // Flush any stale data sitting in the buffers
   while(Serial.available()) Serial.read();
@@ -505,7 +521,7 @@ void testSerialRelay() {
 
   // Tight relay loop
   while (true) {
-    if (emergencyStopTriggered) handleEmergencyStop();
+    if (checkEStop()) return;
 
     // PC -> Mega -> Nano
     if (Serial.available()) {
@@ -516,36 +532,25 @@ void testSerialRelay() {
       Serial.write(PRINTHEAD_SERIAL.read());
     }
 
-    // Hold Minus to Exit
-    if (buttonHeld(btnMinus)) {
-      unsigned long t0 = millis();
-      while (buttonHeld(btnMinus)) {
-        delay(5);
-        if (millis() - t0 > 600) return;
-      }
-    }
+    if (readButton(btnBack)) return;
   }
 }
 void testFireLEDs() { 
   int ms = 500;
   while (true) {
-    if (emergencyStopTriggered) handleEmergencyStop();
+    if (checkEStop()) return;
     oledHeader("Test LEDs");
     display.setCursor(0, 20); displayPrintf(display, "Dur: %d ms", ms);
-    display.setCursor(0, 50); display.print("[+/-] Time [Ent] Fire"); display.display();
-    
+    display.setCursor(0, 50); display.print("[+/-]Time [Ent]Fire [Back]x"); display.sendBuffer();
+
     if (readButton(btnPlus)) ms += 100;
     if (readButton(btnMinus)) { ms -= 100; if (ms < 100) ms = 100; }
     if (readButton(btnEnter)) {
       uint32_t dur[4] = {(uint32_t)ms*1000, (uint32_t)ms*1000, (uint32_t)ms*1000, (uint32_t)ms*1000};
       sendBatchToPrinthead(dur); waitForPrinthead();
+      cancelRequested = false;
     }
-    
-    // Hold Minus to Exit
-    if (buttonHeld(btnMinus)) { 
-      unsigned long t0=millis(); 
-      while(buttonHeld(btnMinus)){ delay(5); if(millis()-t0>600) return; } 
-    }
+    if (readButton(btnBack)) return;
     delay(10);
   }
 }
@@ -554,12 +559,12 @@ void menuTest() {
   int sel = 0;
   const int ITEMS = 2;
   while (true) {
-    if (emergencyStopTriggered) handleEmergencyStop();
+    if (checkEStop()) return;
     oledHeader("Test Menu");
     display.setCursor(0, 20); display.print(sel==0?"> ":"  "); display.print("Fire LEDs");
     display.setCursor(0, 32); display.print(sel==1?"> ":"  "); display.print("Serial Relay");
-    display.setCursor(0, 54); display.print("Hold [-] to exit");
-    display.display();
+    display.setCursor(0, 54); display.print("[Back] to exit");
+    display.sendBuffer();
 
     if (readButton(btnPlus))  sel = (sel + 1) % ITEMS;
     if (readButton(btnMinus)) sel = (sel - 1 + ITEMS) % ITEMS;
@@ -567,14 +572,14 @@ void menuTest() {
       if (sel == 0) testFireLEDs();
       if (sel == 1) testSerialRelay();
     }
-    if (buttonHeld(btnMinus)) { unsigned long t0=millis(); while(buttonHeld(btnMinus)){ delay(5); if(millis()-t0>600) return; } }
+    if (readButton(btnBack)) return;
     delay(10);
   }
 }
 
 void menuBrowser() { menuFileBrowser(); }
 
-void menuPrint() { String picked; if (!listFilesToOLED("/prints", ".bmp", picked)) return; printEntireBMP_4by(picked); }
+void menuPrint() { String picked; if (!listFilesToOLED("/prints", ".bmp", picked)) return; printEntireBMP_4by(picked); cancelRequested = false; }
 
 void zeroXHere() {
   currentSteps = 0;
@@ -582,26 +587,27 @@ void zeroXHere() {
   oledHeader("Utilities");
   display.setCursor(0, 24); display.print("Set X=0 at");
   display.setCursor(0, 36); display.print("current position");
-  display.display();
+  display.sendBuffer();
   delay(900);
 }
 
 void measureMatrix() {
-  oledHeader("Probing Mesh..."); display.display();
+  oledHeader("Probing Mesh..."); display.sendBuffer();
   if (!SD.exists("/meshes")) { SD.mkdir("/meshes"); }
   float spacing_x = MESH_MAX_X / (MESH_SIZE - 1); float spacing_y = MESH_MAX_Y / (MESH_SIZE - 1);
 
   for (int i = 0; i < MESH_SIZE; i++) {
     for (int j = 0; j < MESH_SIZE; j++) {
-      if (emergencyStopTriggered) handleEmergencyStop();
+      if (checkEStop() || checkCancel()) { cancelRequested = false; return; }
       int y_idx = (i % 2 == 0) ? j : (MESH_SIZE - 1 - j);
       moveToPixel((i * spacing_x) / MM_PER_PIXEL);
       yMoveMM(abs((y_idx * spacing_y) - (currentStepsY/STEPS_PER_MM_Y)), (y_idx * spacing_y) > (currentStepsY/STEPS_PER_MM_Y));
       z_mesh[i][y_idx] = probeZ();
-      display.fillRect(0, 20, 128, 44, SSD1306_BLACK);
-      display.setCursor(0, 30); displayPrintf(display, "Pt %d,%d Z:%.2f", i, y_idx, z_mesh[i][y_idx]); display.display();
+      display.setDrawColor(0); display.drawBox(0, 20, 128, 44); display.setDrawColor(1);
+      display.setCursor(0, 30); displayPrintf(display, "Pt %d,%d Z:%.2f", i, y_idx, z_mesh[i][y_idx]); display.sendBuffer();
     }
   }
+  cancelRequested = false;
 
   int fileIndex = 0; String filename;
   do { filename = "/meshes/m" + String(fileIndex) + ".txt"; fileIndex++; } while (SD.exists(filename));
@@ -612,14 +618,14 @@ void measureMatrix() {
       f.println();
     }
     f.close(); mesh_active = true;
-    oledHeader("Mesh Saved"); display.setCursor(0, 20); display.print(filename); display.display(); delay(2000);
+    oledHeader("Mesh Saved"); display.setCursor(0, 20); display.print(filename); display.sendBuffer(); delay(2000);
   }
 }
 
 void loadMatrixFile() { 
   String picked; if (!listFilesToOLED("/meshes", ".txt", picked)) return;
   File f = SD.open(picked); if (!f) return;
-  oledHeader("Loading Mesh"); display.display();
+  oledHeader("Loading Mesh"); display.sendBuffer();
   for (int i = 0; i < MESH_SIZE; i++) {
     String line = f.readStringUntil('\n'); int start = 0;
     for (int j = 0; j < MESH_SIZE; j++) {
@@ -629,78 +635,194 @@ void loadMatrixFile() {
     }
   }
   f.close(); mesh_active = true;
-  display.setCursor(0, 30); display.print("Mesh Active!"); display.display(); delay(1500);
+  display.setCursor(0, 30); display.print("Mesh Active!"); display.sendBuffer(); delay(1500);
 }
 
 void menuUtilities() {
   int sel = 0; const int ITEMS = 4;
   while (true) {
-    if (emergencyStopTriggered) handleEmergencyStop();
+    if (checkEStop()) return;
     oledHeader("Utilities");
     display.setCursor(0, 16); display.print(sel==0?"> ":"  "); display.print("Zero Pos Here");
     display.setCursor(0, 26); display.print(sel==1?"> ":"  "); display.print("Reload Config");
     display.setCursor(0, 36); display.print(sel==2?"> ":"  "); display.print("Measure Bed Mesh");
     display.setCursor(0, 46); display.print(sel==3?"> ":"  "); display.print("Load Bed Mesh");
-    display.display();
+    display.sendBuffer();
     if (readButton(btnPlus))  sel = (sel + 1) % ITEMS;
     if (readButton(btnMinus)) sel = (sel - 1 + ITEMS) % ITEMS;
     if (readButton(btnEnter)) {
       if (sel == 0) { zeroXHere(); return; }
-      if (sel == 1) { bool ok = loadConfigFromSD(CONFIG_FILE_PATH); if (ok) applyConfig(); oledHeader("Reload Config"); display.setCursor(0, 28); display.print(ok ? "Reloaded" : "Failed"); display.display(); delay(900); return; }
+      if (sel == 1) { bool ok = loadConfigFromSD(CONFIG_FILE_PATH); if (ok) applyConfig(); oledHeader("Reload Config"); display.setCursor(0, 28); display.print(ok ? "Reloaded" : "Failed"); display.sendBuffer(); delay(900); return; }
       if (sel == 2) { measureMatrix(); return; }
       if (sel == 3) { loadMatrixFile(); return; }
     }
-    if (buttonHeld(btnMinus)) { unsigned long t0=millis(); while(buttonHeld(btnMinus)){ delay(5); if(millis()-t0>600) return; } }
+    if (readButton(btnBack)) return;
     delay(10);
   }
 }
 
-void menuESP32Control() {
-  oledHeader("ESP32 Mode"); display.setCursor(0, 16); display.print("Waiting for ESP32...");
-  display.setCursor(0, 56); display.print("Hold [-] to exit"); display.display();
+// Runs once a validated "P:w,h:hexdata" arrives while online: alerts the attendant,
+// lets them stage paper on the vacuum bed (toggling the two blower relays), then prints
+// and returns the carriage home. Returns to the idle online screen on cancel/e-stop too.
+static void runIncomingPrint(int w, int h, const String &hexData) {
+  buzzPrintIncoming();
+  oledHeader("Print Incoming");
+  display.setCursor(0, 20); display.print("Place paper on bed");
+  display.setCursor(0, 48); display.print("[Enter] Continue");
+  display.setCursor(0, 56); display.print("[Back] Cancel print");
+  display.sendBuffer();
+  while (true) {
+    if (checkEStop()) return;
+    if (readButton(btnEnter)) break;
+    if (readButton(btnBack)) return;
+    delay(10);
+  }
 
-  ESP_SERIAL.println("READY"); bool exitScreen = false;
-  while (!exitScreen) {
-    if (emergencyStopTriggered) handleEmergencyStop();
-    if (ESP_SERIAL.available()) {
-      String cmd = ESP_SERIAL.readStringUntil('\n'); cmd.trim();
-      if (cmd.startsWith("P:")) {
-        int comma = cmd.indexOf(','); int colon = cmd.indexOf(':', comma);
-        if (comma > 0 && colon > 0) {
-          int w = cmd.substring(2, comma).toInt(); int h = cmd.substring(comma + 1, colon).toInt();
-          String hexData = cmd.substring(colon + 1);
-          oledHeader("ESP32 Print"); display.setCursor(0, 20); displayPrintf(display, "W:%d H:%d", w, h); display.display();
-          const int totalSlices = (h + 3) / 4;
-          for (int slice = 0; slice < totalSlices; ++slice) {
-            Image4x img; img.width = min(MAX_IMG_WIDTH, w);
-            for (int r = 0; r < 4; r++) for (int c = 0; c < MAX_IMG_WIDTH; c++) img.row[r][c] = 0;
-            int visualStart = slice * 4;
-            for (int vr = 0; vr < 4; ++vr) {
-              int rowIdx = visualStart + vr; if (rowIdx >= h) break;
-              for (int col = 0; col < w; ++col) {
-                int strIdx = (rowIdx * w) + col;
-                if (strIdx < (int)hexData.length()) img.row[vr][col] = hexCharToVal(hexData[strIdx]) * 17;
-              }
-            }
-            doPrintBMPSliceSerpentine(img, (slice % 2 == 0), false);
-            if (slice < totalSlices - 1) yMoveMM(CFG.yBandAdvanceMM, true);
+  bool fan1On = true, fan2On = true;
+  setVacRelay(PIN_VAC_RELAY_1, true);
+  setVacRelay(PIN_VAC_RELAY_2, true);
+  bool redraw = true;
+  while (true) {
+    if (checkEStop()) { setVacRelay(PIN_VAC_RELAY_1, false); setVacRelay(PIN_VAC_RELAY_2, false); return; }
+    if (redraw) {
+      oledHeader("Seat Paper");
+      display.setCursor(0, 14); display.print("Fan 1: "); display.print(fan1On ? "ON" : "off");
+      display.setCursor(0, 24); display.print("Fan 2: "); display.print(fan2On ? "ON" : "off");
+      display.setCursor(0, 40); display.print("[+/-] Fans  [Ent] Start");
+      display.setCursor(0, 50); display.print("[Back] Cancel print");
+      display.sendBuffer();
+      redraw = false;
+    }
+    if (readButton(btnMinus)) {
+      if (fan2On)      { fan2On = false; setVacRelay(PIN_VAC_RELAY_2, false); redraw = true; }
+      else if (fan1On) { fan1On = false; setVacRelay(PIN_VAC_RELAY_1, false); redraw = true; }
+    }
+    if (readButton(btnPlus)) {
+      if (!fan1On)      { fan1On = true; setVacRelay(PIN_VAC_RELAY_1, true); redraw = true; }
+      else if (!fan2On) { fan2On = true; setVacRelay(PIN_VAC_RELAY_2, true); redraw = true; }
+    }
+    if (readButton(btnEnter)) break;
+    if (readButton(btnBack)) { setVacRelay(PIN_VAC_RELAY_1, false); setVacRelay(PIN_VAC_RELAY_2, false); return; }
+    delay(10);
+  }
+
+  // The attendant already confirmed above, so skip the print engine's own start prompt.
+  printHexData_4by(w, h, hexData, true);
+
+  setVacRelay(PIN_VAC_RELAY_1, false);
+  setVacRelay(PIN_VAC_RELAY_2, false);
+  if (eStopLatched) return; // Let loop() show the e-stop screen instead of homing.
+
+  bool completedOk = !cancelRequested;
+  cancelRequested = false;
+  if (completedOk) buzzPrintSuccess();
+
+  oledHeader("Homing"); display.setCursor(0, 20); display.print("Returning to origin"); display.sendBuffer();
+  moveToSteps(0);
+  moveYToZero();
+  cancelRequested = false;
+}
+
+void menuESP32Control() {
+  String ip = "waiting...";
+  bool online = false;
+  int tempC = -100;
+  unsigned long lastTempPoll = 0;
+  String inBuf = "";
+  bool redraw = true;
+
+  ESP_SERIAL.println("OFFLINE"); // In case a previous session left the ESP32 thinking it's online.
+
+  while (true) {
+    if (checkEStop()) { if (online) ESP_SERIAL.println("OFFLINE"); return; }
+
+    // Drain lines from the ESP32: periodic "IP:..." broadcasts, and (while online)
+    // a staged "P:w,h:hexdata" print command.
+    while (ESP_SERIAL.available()) {
+      char c = ESP_SERIAL.read();
+      if (c == '\n') {
+        String line = inBuf; line.trim(); inBuf = "";
+        if (line.startsWith("IP:")) {
+          ip = line.substring(3);
+          redraw = true;
+        } else if (online && line.startsWith("P:")) {
+          int comma = line.indexOf(','); int colon = line.indexOf(':', comma);
+          int w = (comma > 0 && colon > 0) ? line.substring(2, comma).toInt() : 0;
+          int h = (comma > 0 && colon > 0) ? line.substring(comma + 1, colon).toInt() : 0;
+          if (comma > 0 && colon > 0 && w > 0 && h > 0) {
+            String hexData = line.substring(colon + 1);
+            runIncomingPrint(w, h, hexData);
+            ESP_SERIAL.println(eStopLatched ? "error" : "finish");
+            if (eStopLatched) return; // Let loop() show the e-stop screen instead of "Waiting...".
+          } else {
+            ESP_SERIAL.println("error");
           }
-          ESP_SERIAL.println("finish");
-          oledHeader("ESP32 Mode"); display.setCursor(0, 16); display.print("Waiting..."); display.display();
-        } else {
-          ESP_SERIAL.println("error");
+          redraw = true;
         }
+      } else {
+        inBuf += c;
       }
     }
-    if (buttonHeld(btnMinus)) {
-      unsigned long t0 = millis();
-      while (buttonHeld(btnMinus)) { delay(5); if (millis() - t0 > 600) { ESP_SERIAL.println("EXIT"); exitScreen = true; break; } }
+
+    if (millis() - lastTempPoll > 1000) {
+      tempC = queryNanoLEDTempC();
+      lastTempPoll = millis();
+      redraw = true;
     }
-    delay(5);
+
+    if (redraw) {
+      oledHeader(online ? "ESP32: ONLINE" : "ESP32: OFFLINE");
+      display.setCursor(0, 12); display.print("IP: "); display.print(ip);
+      display.setCursor(0, 24);
+      if (tempC > -100) displayPrintf(display, "LED Temp: %dC", tempC); else display.print("LED Temp: --");
+      display.setCursor(0, 40); display.print(online ? "Waiting for print..." : "[Enter] Go Online");
+      display.setCursor(0, 52); display.print(online ? "[Back] Go Offline" : "[Back] Exit");
+      display.sendBuffer();
+      redraw = false;
+    }
+
+    if (readButton(btnEnter) && !online) {
+      online = true;
+      ESP_SERIAL.println("ONLINE");
+      redraw = true;
+    }
+    if (readButton(btnBack)) {
+      if (online) { online = false; ESP_SERIAL.println("OFFLINE"); redraw = true; }
+      else return;
+    }
+
+    delay(10);
   }
 }
 
 enum MainMenu { MM_CALIB = 0, MM_PRINT = 1, MM_TEST = 2, MM_MOTOR = 3, MM_BROWSER = 4, MM_UTILS = 5, MM_ESP32 = 6 };
+
+// Shown by loop() instead of the normal menu whenever eStopLatched is true. Requires a
+// deliberate hold (not just a tap) to clear, and re-checks the Nano before actually
+// clearing so a still-engaged switch or still-hot printhead can't be waved away.
+void renderEmergencyStopScreen() {
+  static unsigned long holdStart = 0;
+
+  oledHeader("EMERGENCY STOP");
+  display.setCursor(0, 16); display.print("Cause: "); display.print(eStopCause);
+  display.setCursor(0, 32); display.print("Inspect machine, then");
+  display.setCursor(0, 42); display.print("hold [Enter] to clear");
+
+  if (buttonHeld(btnEnter)) {
+    if (holdStart == 0) holdStart = millis();
+    if (millis() - holdStart > 2000) {
+      if (queryNanoLimitMask() == 0) {
+        clearEmergencyStop();
+      } else {
+        display.setCursor(0, 54); display.print("Still triggered!");
+      }
+      holdStart = 0;
+    }
+  } else {
+    holdStart = 0;
+  }
+  display.sendBuffer();
+}
 
 void menuMain() {
   static int mainSel = 0;
@@ -741,11 +863,12 @@ void menuMain() {
   display.setCursor(58, 14); display.print(mainSel==4?"> ":"  "); display.print("Browser");
   display.setCursor(58, 26); display.print(mainSel==5?"> ":"  "); display.print("Utils");
   display.setCursor(58, 38); display.print(mainSel==6?"> ":"  "); display.print("ESP32");
-  display.display();
+  display.sendBuffer();
 
   if (readButton(btnPlus))  mainSel = (mainSel + 1) % 7;
   if (readButton(btnMinus)) mainSel = (mainSel - 1 + 7) % 7;
   if (readButton(btnEnter)) {
+    cancelRequested = false; // Fresh start for whichever submenu we're entering.
     if      (mainSel == MM_CALIB)   menuCalib();
     else if (mainSel == MM_PRINT)   menuPrint();
     else if (mainSel == MM_TEST)    menuTest();

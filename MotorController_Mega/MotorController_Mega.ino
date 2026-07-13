@@ -6,7 +6,7 @@
 // --- Actual Global Definitions ---
 Config CFG; 
 SdFat SD;
-Adafruit_SSD1306 display(128, 64, &Wire, -1);
+OledDisplay display(U8G2_R0, /*reset=*/ U8X8_PIN_NONE);
 
 const int PIN_SD_CS = 53;     
 const int PIN_STEP = 2;       
@@ -17,8 +17,15 @@ const int PIN_YR_STEP = 4;
 const int PIN_Y_DIR   = 6;    
 const int PIN_YR_DIR  = 7;    
 const int PIN_Z_STEP  = 12;
-const int PIN_Z_DIR   = 13;   
-const int PIN_Z_CONTACT = A8;
+const int PIN_Z_DIR   = 13;
+const int PIN_NANO_ESTOP = A8; // Shared Nano e-stop line (Z limit / Y limit / overtemp), see uv_globals.h
+const int PIN_BUZZER = 9;      // Piezo buzzer: alerts operator that an ESP32-triggered print is staged and waiting on [Enter]
+
+// Spare pins on the bare header, immediately after btnBack (29): 30-37.
+// TODO confirm these against actual wiring before relying on them.
+const int PIN_ALERT_BUZZER = 30; // Attendant-facing "print incoming" / success chime
+const int PIN_VAC_RELAY_1  = 31; // Vacuum blower fan 1 (active-LOW relay driver)
+const int PIN_VAC_RELAY_2  = 32; // Vacuum blower fan 2 (active-LOW relay driver)
 
 const float Z_HOME_SWITCH_TO_PAPER_MM = 8.0f;
 const float Z_MAX_TO_CR_TOUCH_APPROACH_MM = 12.0f;
@@ -27,6 +34,7 @@ const float Z_MAX_TO_CR_TOUCH_APPROACH_MM = 12.0f;
 Btn btnPlus  = {26, LOW, 0, false, false}; // Changed HIGH to LOW
 Btn btnMinus = {27, LOW, 0, false, false}; // Changed HIGH to LOW
 Btn btnEnter = {28, LOW, 0, false, false}; // Changed HIGH to LOW
+Btn btnBack  = {29, LOW, 0, false, false};
 
 const int MOTOR_STEPS_PER_REV = 200;
 int MICROSTEPS_X = 16;
@@ -55,6 +63,9 @@ const float MESH_MAX_Y = 50.0f;
 
 volatile bool emergencyStopTriggered = false;
 volatile bool zHomingActive = false;
+bool eStopLatched = false;
+String eStopCause = "";
+bool cancelRequested = false;
 float LUT16[16] = { 0.00, 0.10, 0.20, 0.30, 0.40, 0.55, 0.70, 0.90, 1.10, 1.30, 1.60, 2.00, 2.50, 3.20, 4.00, 5.00 };
 float LED_SCALE[4] = {1.0, 1.0, 1.0, 1.0}; // Provide actual definitions
 int ROW_FOR_LED[4] = {3, 2, 1, 0};
@@ -68,18 +79,40 @@ void serialPrintf(const char *fmt, ...) {
 
 long lround_double(double x) { return (x >= 0.0) ? (long)(x + 0.5) : (long)(x - 0.5); }
 
-void handleEmergencyStop() {
-  // Add your emergency stop logic here (was missing from source dump)
-  Serial.println("E-STOP TRIGGERED!");
+void buzzReady() {
+  tone(PIN_BUZZER, 2000, 150); delay(200);
+  tone(PIN_BUZZER, 2000, 150); delay(200);
+  noTone(PIN_BUZZER);
 }
 
+// Three short high beeps: a print arrived and validated -- go seat paper on the vacuum bed.
+void buzzPrintIncoming() {
+  for (int i = 0; i < 3; i++) { tone(PIN_ALERT_BUZZER, 2500, 120); delay(180); }
+  noTone(PIN_ALERT_BUZZER);
+}
+
+// Rising three-note chime: print finished successfully.
+void buzzPrintSuccess() {
+  tone(PIN_ALERT_BUZZER, 1500, 150); delay(180);
+  tone(PIN_ALERT_BUZZER, 2000, 150); delay(180);
+  tone(PIN_ALERT_BUZZER, 2500, 250); delay(280);
+  noTone(PIN_ALERT_BUZZER);
+}
+
+// handleEmergencyStop() is defined in uv_print.cpp -- it needs PRINTHEAD_SERIAL to ask
+// the Nano which limit fired, so it lives alongside the other Nano UART helpers.
+
 void contactInterruptHandler() {
-  // Add your pin change interrupt logic here (was missing from source dump)
-  emergencyStopTriggered = true; 
+  // ISR: keep this minimal (no Serial/SD/delay). Just latch the raw signal; classification
+  // (real e-stop vs. an expected homing touch) happens later in handleEmergencyStop().
+  emergencyStopTriggered = true;
 }
 
 void setup() {
   Serial.begin(115200);
+
+  // ESP8266 / ESP-side link on the Mega+WiFi board uses Serial3
+  // (RX3 = pin 15, TX3 = pin 14) for inter-processor communication.
   ESP_SERIAL.begin(ESP_BAUD);
   PRINTHEAD_SERIAL.begin(PRINTHEAD_BAUD);
   
@@ -92,14 +125,20 @@ void setup() {
   pinMode(PIN_Y_DIR, OUTPUT); 
   pinMode(PIN_YR_DIR, OUTPUT);
   
-  pinMode(PIN_Z_STEP, OUTPUT); 
+  pinMode(PIN_Z_STEP, OUTPUT);
   pinMode(PIN_Z_DIR, OUTPUT);
-  pinMode(PIN_Z_CONTACT, INPUT_PULLUP);
-  attachPCINT(digitalPinToPCINT(PIN_Z_CONTACT), contactInterruptHandler, FALLING);
+  pinMode(PIN_NANO_ESTOP, INPUT_PULLUP);
+  attachPCINT(digitalPinToPCINT(PIN_NANO_ESTOP), contactInterruptHandler, FALLING);
 
-  pinMode(btnPlus.pin, INPUT_PULLUP); 
-  pinMode(btnMinus.pin, INPUT_PULLUP); 
+  pinMode(btnPlus.pin, INPUT_PULLUP);
+  pinMode(btnMinus.pin, INPUT_PULLUP);
   pinMode(btnEnter.pin, INPUT_PULLUP);
+  pinMode(btnBack.pin, INPUT_PULLUP);
+  pinMode(PIN_BUZZER, OUTPUT);
+
+  pinMode(PIN_ALERT_BUZZER, OUTPUT);
+  pinMode(PIN_VAC_RELAY_1, OUTPUT); setVacRelay(PIN_VAC_RELAY_1, false);
+  pinMode(PIN_VAC_RELAY_2, OUTPUT); setVacRelay(PIN_VAC_RELAY_2, false);
 
 
   STEPS_PER_MM_X  = (MOTOR_STEPS_PER_REV * MICROSTEPS_X) / LEAD_MM_X;
@@ -108,8 +147,12 @@ void setup() {
   OFFSET_PIXELS   = max(1, (int)(LED_SPACING_MM / MM_PER_PIXEL + 0.5f));
 
   Wire.begin();
-  display.begin(SSD1306_SWITCHCAPVCC, 0x3C); 
-  display.clearDisplay(); display.display();
+  display.begin();
+  // Match Adafruit_GFX's "y = top of glyph" convention so every existing setCursor(x,y)
+  // call in the menu code keeps working unchanged instead of landing on the baseline.
+  display.setFontPosTop();
+  display.setFont(u8g2_font_6x10_tf);
+  display.clearBuffer(); display.sendBuffer();
 
   SPI.begin();
   if (SD.begin(PIN_SD_CS)) {
@@ -130,6 +173,11 @@ void setup() {
 
 void loop() {
   if (emergencyStopTriggered) handleEmergencyStop();
+  if (eStopLatched) {
+    renderEmergencyStopScreen();
+    delay(10);
+    return;
+  }
   menuMain();
   delay(10);
 }

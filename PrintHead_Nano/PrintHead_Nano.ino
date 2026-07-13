@@ -11,11 +11,19 @@
 #include <Adafruit_NeoPixel.h>
 
 // --- Hardware Pins (Mapped to Custom PCB) ---
-const int PIN_LED[4]      = {10, 11, 12, 13}; 
-const int PIN_TEMP[6]     = {A0, A1, A2, A3, A4, A5}; 
-const int PIN_PROBE_SIG   = 7;  // LIMIT_SURFACE
+const int PIN_LED[4]      = {10, 11, 12, 13};
+const int PIN_TEMP[6]     = {A0, A1, A2, A3, A4, A5};
+const int PIN_PROBE_SIG   = 7;  // LIMIT_SURFACE -- also the Z hard-limit switch
 const int PIN_PROBE_SERVO = 3;  // Hardware PWM for CR Touch
 const int PIN_NEOPIXEL    = 8;  // NEO_IN
+// NEW -- confirm against actual wiring before flashing:
+const int PIN_Y_LIMIT     = 4;  // Y-axis hard-limit switch (INPUT_PULLUP, active LOW)
+const int PIN_ESTOP_OUT   = 9;  // Drives Mega's single interrupt pin (A8) LOW while any stop condition is active
+
+// --- Thermal Safety ---
+const float TEMP_TRIP_C  = 120.0f; // T[0] (printhead LED temp) at/above this: force LEDs off + assert e-stop
+const float TEMP_CLEAR_C = 110.0f; // Hysteresis: must drop back below this before the trip can clear
+bool thermalTripped = false;
 
 // --- CR Touch ---
 Servo crTouch;
@@ -113,7 +121,7 @@ void processCommand(String cmd) {
     Serial.print("S:");
     Serial.print(activeMask);
     Serial.print("\n");
-    triggerNeo(C_INFO, C_SUCC);
+    //triggerNeo(C_INFO, C_SUCC);
   } 
   else if (cmd == "P") {
     bool triggered = (digitalRead(PIN_PROBE_SIG) == LOW);
@@ -141,6 +149,17 @@ void processCommand(String cmd) {
     Serial.print("\n");
     triggerNeo(C_INFO, C_SUCC);
   }
+  else if (cmd == "L") {
+    // Reports which stop condition(s) are currently active: bit0=Z, bit1=Y, bit2=overtemp.
+    uint8_t mask = 0;
+    if (digitalRead(PIN_PROBE_SIG) == LOW) bitSet(mask, 0);
+    if (digitalRead(PIN_Y_LIMIT) == LOW)   bitSet(mask, 1);
+    if (thermalTripped)                    bitSet(mask, 2);
+    Serial.print("L:");
+    Serial.print(mask);
+    Serial.print("\n");
+    triggerNeo(C_INFO, mask ? C_ERR : C_SUCC);
+  }
   else if (cmd == "R") {
     for (int i = 0; i < 4; i++) {
       ledActive[i] = false;
@@ -149,6 +168,11 @@ void processCommand(String cmd) {
     triggerNeo(C_RESET, C_SUCC);
   }
   else if (cmd.startsWith("F:")) {
+    if (thermalTripped) {
+      // Refuse to arm LEDs while over temperature, even if the Mega hasn't caught up yet.
+      triggerNeo(C_ERR, C_ERR);
+      return;
+    }
     int maskIdx = cmd.indexOf(':') + 1;
     int comma1 = cmd.indexOf(',', maskIdx);
     int comma2 = cmd.indexOf(',', comma1 + 1);
@@ -197,10 +221,13 @@ void setup() {
   }
   
   pinMode(PIN_PROBE_SIG, INPUT_PULLUP);
+  pinMode(PIN_Y_LIMIT, INPUT_PULLUP);
+  pinMode(PIN_ESTOP_OUT, OUTPUT);
+  digitalWrite(PIN_ESTOP_OUT, HIGH); // Idle inactive; Mega's A8 uses INPUT_PULLUP + FALLING interrupt.
   crTouch.attach(PIN_PROBE_SERVO);
   crTouch.write(90); // Stow on boot
-  
-  inBuffer.reserve(64); 
+
+  inBuffer.reserve(64);
   triggerNeo(C_BOOT, C_SUCC);
 }
 
@@ -239,9 +266,29 @@ void loop() {
       float tempC = (voltage - 0.5) * 100.0;
       currentTemps[i] = max(0, min(255, (int)tempC));
     }
+
+    // T[0] is the printhead LED temp -- cut power immediately on overtemp, independent
+    // of whether the Mega is currently free to poll for it.
+    if (!thermalTripped && currentTemps[0] >= TEMP_TRIP_C) {
+      thermalTripped = true;
+      for (int i = 0; i < 4; i++) {
+        ledActive[i] = false;
+        digitalWrite(PIN_LED[i], LOW);
+      }
+      triggerNeo(C_ERR, C_ERR);
+    } else if (thermalTripped && currentTemps[0] <= TEMP_CLEAR_C) {
+      thermalTripped = false;
+    }
+
     lastTempRead = millis();
   }
 
-  // 5. Update NeoPixel State Machine
+  // 5. Drive the shared e-stop line to the Mega: LOW while any stop condition is active.
+  bool limitActive = (digitalRead(PIN_PROBE_SIG) == LOW) ||
+                      (digitalRead(PIN_Y_LIMIT) == LOW) ||
+                      thermalTripped;
+  digitalWrite(PIN_ESTOP_OUT, limitActive ? LOW : HIGH);
+
+  // 6. Update NeoPixel State Machine
   handleNeoPixel();
 }

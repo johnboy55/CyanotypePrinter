@@ -5,28 +5,48 @@
 #include <Wire.h>
 #include <SPI.h>
 #include <SdFat.h>
-#include <Adafruit_GFX.h>  
-#include <Adafruit_SSD1306.h>
+#include <U8g2lib.h>
 #include <stdarg.h>
 #include <stdio.h>
 #include <PinChangeInterrupt.h>
 #include "uv_types.h"
 
+// 2.42" SSD1309 128x64, hardware I2C, full-frame-buffer mode (matches the old
+// Adafruit_SSD1306 "draw everything then push once" usage pattern). If the picture
+// comes out mirrored/garbled on your specific panel, try the NONAME2 variant instead --
+// SSD1309 clone boards commonly need one or the other depending on their init sequence.
+typedef U8G2_SSD1309_128X64_NONAME0_F_HW_I2C OledDisplay;
+
 #define FW_VERSION "UV Controller v2.2.0"
 
 #define PRINTHEAD_SERIAL Serial1
 #define PRINTHEAD_BAUD 115200
-#define ESP_SERIAL Serial3 
+// ESP-side link on the Mega+WiFi board is routed through Serial3.
+#define ESP_SERIAL Serial3
 #define ESP_BAUD 115200
 
 // --- Globals ---
 extern SdFat SD;
-extern Adafruit_SSD1306 display;
+extern OledDisplay display;
 
-extern const int PIN_SD_CS;     
-extern const int PIN_STEP, PIN_DIR, PIN_EN;       
-extern const int PIN_YL_STEP, PIN_YR_STEP, PIN_Y_DIR, PIN_YR_DIR;    
-extern const int PIN_Z_STEP, PIN_Z_DIR, PIN_Z_CONTACT;   
+extern const int PIN_SD_CS;
+extern const int PIN_STEP, PIN_DIR, PIN_EN;
+extern const int PIN_YL_STEP, PIN_YR_STEP, PIN_Y_DIR, PIN_YR_DIR;
+extern const int PIN_Z_STEP, PIN_Z_DIR;
+// Single shared interrupt pin driven by the Nano's PIN_ESTOP_OUT: goes LOW when the
+// Nano's Z limit, Y limit, or thermal cutoff fires (OR'd together on the Nano side).
+extern const int PIN_NANO_ESTOP;
+extern const int PIN_BUZZER;
+// Spare pins on the bare header, immediately after btnBack (29): 30-37.
+// TODO confirm these against actual wiring before relying on them.
+extern const int PIN_ALERT_BUZZER; // 30 -- attendant-facing "print incoming" / success chime
+extern const int PIN_VAC_RELAY_1;  // 31 -- vacuum blower fan 1 (active-LOW relay driver)
+extern const int PIN_VAC_RELAY_2;  // 32 -- vacuum blower fan 2 (active-LOW relay driver)
+
+// The relay board is active-LOW: pull the pin LOW to energize the relay (fan on).
+// Every fan on/off toggle should go through this rather than raw digitalWrite, so the
+// polarity only ever needs correcting in one place.
+inline void setVacRelay(int pin, bool on) { digitalWrite(pin, on ? LOW : HIGH); }
 
 extern const float Z_HOME_SWITCH_TO_PAPER_MM;
 extern const float Z_MAX_TO_CR_TOUCH_APPROACH_MM;
@@ -34,6 +54,7 @@ extern const float Z_MAX_TO_CR_TOUCH_APPROACH_MM;
 extern Btn btnPlus;
 extern Btn btnMinus;
 extern Btn btnEnter;
+extern Btn btnBack; // Dedicated back/cancel button (pin 29)
 
 extern const int MOTOR_STEPS_PER_REV;
 extern int MICROSTEPS_X, MICROSTEPS_Y;
@@ -50,8 +71,11 @@ extern float z_mesh[3][3];
 extern bool mesh_active;
 extern const float MESH_MAX_X, MESH_MAX_Y;
 
-extern volatile bool emergencyStopTriggered;
-extern volatile bool zHomingActive;
+extern volatile bool emergencyStopTriggered; // Raw ISR flag; classified/consumed by handleEmergencyStop()
+extern volatile bool zHomingActive;          // True while a Z-contact touch is expected (homing/probing)
+extern bool eStopLatched;                    // True once a genuine e-stop is confirmed; requires operator clear
+extern String eStopCause;                    // Human-readable cause of the current latch, e.g. "Z", "Y", "OVERTEMP"
+extern bool cancelRequested;                 // Operator hit Back mid-move/print; abort the current operation only
 extern float LUT16[16];
 extern float LED_SCALE[4];
 
@@ -64,5 +88,8 @@ void serialPrintf(const char *fmt, ...);
 long lround_double(double x);
 void handleEmergencyStop();
 void contactInterruptHandler();
+void buzzReady();
+void buzzPrintIncoming(); // Attendant alert: a validated print arrived, go seat paper
+void buzzPrintSuccess();  // Print finished successfully
 
 #endif

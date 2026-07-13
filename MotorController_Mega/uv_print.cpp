@@ -51,7 +51,7 @@ void sendBatchToPrinthead(uint32_t durations[4]) {
 void waitForPrinthead() {
   bool isBusy = true;
   while (isBusy) {
-    if (emergencyStopTriggered) handleEmergencyStop();
+    if (checkEStop() || checkCancel()) return;
     PRINTHEAD_SERIAL.print("S\n");
     unsigned long timeout = millis();
     while (!PRINTHEAD_SERIAL.available() && millis() - timeout < 10) {}
@@ -67,7 +67,10 @@ bool isProbeTriggered() {
   PRINTHEAD_SERIAL.print("P\n");
   unsigned long timeout = millis();
   while (!PRINTHEAD_SERIAL.available() && millis() - timeout < 100) {
-    if (emergencyStopTriggered && !zHomingActive) handleEmergencyStop();
+    // Don't classify/query the Nano from inside this wait -- that would overlap two
+    // outstanding requests on the same UART. Just bail out; the caller's stepping loop
+    // calls checkEStop() on its next iteration, once this exchange has finished.
+    if (emergencyStopTriggered) break;
   }
   if (PRINTHEAD_SERIAL.available()) {
     String response = PRINTHEAD_SERIAL.readStringUntil('\n'); response.trim();
@@ -77,7 +80,94 @@ bool isProbeTriggered() {
 }
 
 bool isZMaxSwitchPressed() {
-  return digitalRead(PIN_Z_CONTACT) == LOW;
+  // PIN_PROBE_SIG on the Nano IS the Z limit switch (same signal isProbeTriggered() reads);
+  // there's no separate Mega-side pin for it any more, so just reuse that query.
+  return isProbeTriggered();
+}
+
+// ---------- Emergency Stop ----------
+// emergencyStopTriggered (volatile, ISR-set) is a raw, unclassified signal: the Nano ORs
+// its Z limit, Y limit, and thermal cutoff onto one line, so a rising/falling edge alone
+// doesn't say which one fired, or whether it was an *expected* touch (e.g. Z homing).
+// eStopLatched is the classified, operator-visible result: once true, all motion stops
+// until clearEmergencyStop() is called from the menu.
+static bool eStopAnnounced = false;
+
+int queryNanoLimitMask() {
+  PRINTHEAD_SERIAL.print("L\n");
+  unsigned long timeout = millis();
+  while (!PRINTHEAD_SERIAL.available() && millis() - timeout < 100) {}
+  if (PRINTHEAD_SERIAL.available()) {
+    String resp = PRINTHEAD_SERIAL.readStringUntil('\n'); resp.trim();
+    if (resp.startsWith("L:")) return resp.substring(2).toInt();
+  }
+  return -1; // Nano not responding -- never assume this means "safe".
+}
+
+// T[0] from the Nano's "T:t0,t1,t2,t3,t4,t5" reply is the printhead LED temperature (C).
+int queryNanoLEDTempC() {
+  PRINTHEAD_SERIAL.print("T\n");
+  unsigned long timeout = millis();
+  while (!PRINTHEAD_SERIAL.available() && millis() - timeout < 100) {}
+  if (PRINTHEAD_SERIAL.available()) {
+    String resp = PRINTHEAD_SERIAL.readStringUntil('\n'); resp.trim();
+    if (resp.startsWith("T:")) {
+      String rest = resp.substring(2);
+      int comma = rest.indexOf(',');
+      return (comma > 0 ? rest.substring(0, comma) : rest).toInt();
+    }
+  }
+  return -100; // Nano not responding -- caller should render this as "--" rather than a real reading.
+}
+
+static String describeEStopCause(int mask) {
+  if (mask < 0) return "NANO OFFLINE";
+  if (mask == 0) return "UNKNOWN";
+  String s;
+  if (mask & 0x1) s += "Z ";
+  if (mask & 0x2) s += "Y ";
+  if (mask & 0x4) s += "OVERTEMP ";
+  return s;
+}
+
+void handleEmergencyStop() {
+  digitalWrite(PIN_EN, HIGH); // Always keep drivers disabled while a stop condition is live.
+
+  if (eStopLatched) return; // Already latched; callers check eStopLatched/checkEStop() to abort.
+
+  int mask = queryNanoLimitMask();
+  bool zOnly = (mask == 0x1);
+  bool expectedTouch = zHomingActive && zOnly;
+
+  emergencyStopTriggered = false; // Consumed either way; classification below decides the outcome.
+
+  if (expectedTouch) return; // Intentional Z contact during homing/probing -- not a real stop.
+
+  eStopLatched = true;
+  eStopCause = describeEStopCause(mask);
+
+  if (!eStopAnnounced) {
+    eStopAnnounced = true;
+    Serial.print(F("E-STOP LATCHED: ")); Serial.println(eStopCause);
+  }
+}
+
+bool checkEStop() {
+  if (emergencyStopTriggered) handleEmergencyStop();
+  return eStopLatched;
+}
+
+void clearEmergencyStop() {
+  eStopLatched = false;
+  eStopAnnounced = false;
+  eStopCause = "";
+  emergencyStopTriggered = false;
+  digitalWrite(PIN_EN, HIGH); // Stay disabled; the next intentional move re-enables it.
+}
+
+bool checkCancel() {
+  if (readButton(btnBack)) cancelRequested = true;
+  return cancelRequested;
 }
 
 void moveZStepsRelative(long deltaSteps) {
@@ -91,7 +181,7 @@ void moveZStepsRelative(long deltaSteps) {
   int zDelay = max(1000, STEP_PERIOD_US * 4);
   
   for (long i = 0; i < steps; ++i) {
-    if (emergencyStopTriggered && !zHomingActive) handleEmergencyStop();
+    if (checkEStop() || checkCancel()) break;
     digitalWrite(PIN_Z_STEP, HIGH);
     delayMicroseconds(STEP_PULSE_US);
     digitalWrite(PIN_Z_STEP, LOW);
@@ -119,8 +209,9 @@ void moveZSteps(long targetStepsZ) {
   delayMicroseconds(5);
   
   int zDelay = max(1000, STEP_PERIOD_US * 4);
-  
+
   for (long i = 0; i < steps; ++i) {
+    if (checkEStop() || checkCancel()) break;
     digitalWrite(PIN_Z_STEP, HIGH);
     delayMicroseconds(STEP_PULSE_US);
     digitalWrite(PIN_Z_STEP, LOW);
@@ -136,10 +227,7 @@ void homeZ() {
   digitalWrite(PIN_Z_DIR, LOW);
   delayMicroseconds(5);
   while (!isZMaxSwitchPressed()) {
-    if (emergencyStopTriggered) {
-      zHomingActive = false;
-      handleEmergencyStop();
-    }
+    if (checkEStop() || checkCancel()) { zHomingActive = false; return; }
     digitalWrite(PIN_Z_STEP, HIGH);
     delayMicroseconds(STEP_PULSE_US);
     digitalWrite(PIN_Z_STEP, LOW);
@@ -151,16 +239,14 @@ void homeZ() {
 
   long approachSteps = lround_double(Z_MAX_TO_CR_TOUCH_APPROACH_MM * STEPS_PER_MM_Z);
   moveZStepsRelative(approachSteps);
+  if (eStopLatched || cancelRequested) { zHomingActive = false; return; }
 
   deployProbe();
-  
+
   digitalWrite(PIN_Z_DIR, HIGH);
   delayMicroseconds(5);
   while (!isProbeTriggered()) {
-    if (emergencyStopTriggered) {
-      zHomingActive = false;
-      handleEmergencyStop();
-    }
+    if (checkEStop() || checkCancel()) { zHomingActive = false; return; }
     digitalWrite(PIN_Z_STEP, HIGH);
     delayMicroseconds(STEP_PULSE_US);
     digitalWrite(PIN_Z_STEP, LOW);
@@ -208,19 +294,23 @@ float probeZ() {
   int zDelay = max(1000, STEP_PERIOD_US * 4);
   digitalWrite(PIN_Z_DIR, HIGH);
   delayMicroseconds(5);
+  zHomingActive = true; // The probe touch here is expected -- don't let it trip a full e-stop.
   while (!isProbeTriggered()) {
+    if (checkEStop() || checkCancel()) { zHomingActive = false; stowProbe(); return 0.0f; }
     digitalWrite(PIN_Z_STEP, HIGH);
     delayMicroseconds(STEP_PULSE_US);
     digitalWrite(PIN_Z_STEP, LOW);
     currentStepsZ += 1;
     delayMicroseconds(zDelay);
   }
+  zHomingActive = false;
   float trigger_height = currentStepsZ / STEPS_PER_MM_Z;
   stowProbe();
-  
+
   digitalWrite(PIN_Z_DIR, LOW);
   delayMicroseconds(5);
   for (int i = 0; i < (2.0f * STEPS_PER_MM_Z); i++) {
+    if (checkEStop() || checkCancel()) return trigger_height;
     digitalWrite(PIN_Z_STEP, HIGH);
     delayMicroseconds(STEP_PULSE_US);
     digitalWrite(PIN_Z_STEP, LOW);
@@ -245,7 +335,7 @@ void stepN(long n, bool dir) {
   long err = n / 2;
 
   for (long i = 0; i < n; ++i) {
-    if (emergencyStopTriggered) handleEmergencyStop();
+    if (checkEStop() || checkCancel()) break;
     stepPulseOnceX(); currentSteps += dir ? 1 : -1;
     if (mesh_active && dz > 0) { err -= dz;
       if (err < 0) { zPulse(zDir); err += n; } }
@@ -267,7 +357,7 @@ void yStepPair(long stepsL, long stepsR, bool dir) {
   long accL = 0, accR = 0;
 
   for (long i = 0; i < N; ++i) {
-    if (emergencyStopTriggered) handleEmergencyStop();
+    if (checkEStop() || checkCancel()) break;
     accL += stepsL; accR += stepsR;
     if (accL >= N) { yPulseLeft(); accL -= N; }
     if (accR >= N) { yPulseRight(); accR -= N; }
@@ -315,6 +405,16 @@ void yMoveSkewMM(float baseMM, float deltaRightMM, bool forward) {
   STEP_PERIOD_US = max(STEP_PULSE_US + 10, oldPeriod / 4);
   yStepPair(sL, sR, forward);
   STEP_PERIOD_US = oldPeriod;
+}
+
+// Y-axis counterpart to moveToSteps(0) for X: returns the carriage to Y=0 from wherever
+// currentStepsY currently tracks. yStepPair's dir=true increases currentStepsY, so we
+// move backward (dir=false) from a positive count and forward from a negative one.
+void moveYToZero() {
+  if (currentStepsY == 0) return;
+  bool forward = (currentStepsY < 0);
+  float mm = abs((float)currentStepsY / STEPS_PER_MM_Y);
+  yMoveMM(mm, forward);
 }
 
 void xMoveMM(float mm, bool right) { 
@@ -425,9 +525,11 @@ bool loadBMPMeta(const String &path, BMPMeta &m) {
 
 bool readFourRowsAt(const String &path, const BMPMeta &m, int visualStart, Image4x &img) {
   img.width = min(MAX_IMG_WIDTH, m.W);
-  for (int r = 0; r < 4; r++)
+  for (int r = 0; r < 4; r++) {
+    img.valid[r] = false;
     for (int c = 0; c < MAX_IMG_WIDTH; c++)
       img.row[r][c] = 0;
+  }
   File f = SD.open(path);
   if (!f) return false;
 
@@ -437,6 +539,7 @@ bool readFourRowsAt(const String &path, const BMPMeta &m, int visualStart, Image
   for (int vr = 0; vr < 4; ++vr) {
     const int visualRow = visualStart + vr;
     if (visualRow >= m.H) break;
+    img.valid[vr] = true;
 
     const int srcRow = m.bottomUp ? (m.H - 1 - visualRow) : visualRow;
     const uint32_t rowOffset = m.fh.bfOffBits + (uint32_t)srcRow * m.rowStride;
@@ -474,53 +577,113 @@ bool readFourRowsAt(const String &path, const BMPMeta &m, int visualStart, Image
  * @param img         Reference to an Image4x struct where the extracted pixel data is stored.
  * @return true if the file was successfully read and parsed, false on file/read errors.
  */
-bool readFourRowsBy(const String &path, const BMPMeta &m, int visualStart, Image4x &img) {
-  img.width = min(MAX_IMG_WIDTH, m.W);
-  for (int r = 0; r < 4; r++)
+// ---------- Row source abstraction ----------
+// Lets the 4-pass print engine (printFromRowSource, below) pull rows from either an SD
+// BMP file or the ESP32's in-memory hex string, without buffering more than a few rows
+// at a time -- the Mega's 8KB SRAM can't hold a full print image either way.
+class RowSource {
+public:
+  int width = 0;
+  int height = 0;
+  // Whether CFG.invertImage should apply to this source. BMP files use it (their
+  // grayscale convention needs inverting for correct UV exposure); the ESP32's hex
+  // payload already encodes intensity directly -- higher value the operator drew
+  // darker, which should mean *more* exposure -- so it must never be inverted.
+  bool wantsInvert = true;
+  virtual bool readRow(int row, uint8_t *out, int cols) = 0; // fills out[0..cols-1], cols <= width
+  virtual ~RowSource() {}
+};
+
+class BMPFileRowSource : public RowSource {
+  File f;
+  BMPFILEHEADER fh;
+  BMPINFOHEADER ih;
+  bool bottomUp = false;
+  int rowStride = 0;
+public:
+  bool open(const String &path) {
+    f = SD.open(path);
+    if (!f) return false;
+    if (f.read((uint8_t*)&fh, sizeof(fh)) != sizeof(fh) || fh.bfType != 0x4D42) { f.close(); return false; }
+    if (f.read((uint8_t*)&ih, sizeof(ih)) != sizeof(ih)) { f.close(); return false; }
+    if (ih.biCompression != 0 || (ih.biBitCount != 24 && ih.biBitCount != 8)) { f.close(); return false; }
+
+    bottomUp = (ih.biHeight > 0);
+    height   = abs(ih.biHeight);
+    width    = ih.biWidth;
+    const int rowBytesRaw = (ih.biBitCount * width + 7) / 8;
+    rowStride = (rowBytesRaw + 3) & ~3;
+    if (rowStride > MAX_ROWBUF) { f.close(); return false; }
+    return true;
+  }
+
+  bool readRow(int row, uint8_t *out, int cols) override {
+    if (!f) return false;
+    const int srcRow = bottomUp ? (height - 1 - row) : row;
+    const uint32_t rowOffset = fh.bfOffBits + (uint32_t)srcRow * rowStride;
+    uint8_t rowbuf[MAX_ROWBUF];
+    f.seek(rowOffset);
+    if (f.read(rowbuf, rowStride) != rowStride) return false;
+    if (ih.biBitCount == 24) {
+      for (int c = 0; c < cols; c++) {
+        const int idx = c * 3;
+        const uint8_t B = rowbuf[idx + 0], G = rowbuf[idx + 1], R = rowbuf[idx + 2];
+        out[c] = (uint8_t)(0.299f*R + 0.587f*G + 0.114f*B);
+      }
+    } else {
+      for (int c = 0; c < cols; c++) out[c] = rowbuf[c];
+    }
+    return true;
+  }
+
+  ~BMPFileRowSource() override { if (f) f.close(); }
+};
+
+class HexRowSource : public RowSource {
+  const String *hexData;
+public:
+  void init(int w, int h, const String &hex) { width = w; height = h; hexData = &hex; wantsInvert = false; }
+  bool readRow(int row, uint8_t *out, int cols) override {
+    for (int c = 0; c < cols; c++) {
+      const int idx = row * width + c;
+      out[c] = (idx < (int)hexData->length()) ? (uint8_t)(hexCharToVal((*hexData)[idx]) * 17) : 0;
+    }
+    return true;
+  }
+};
+
+bool readFourRowsBy(RowSource &src, int visualStart, Image4x &img) {
+  img.width = min(MAX_IMG_WIDTH, src.width);
+  for (int r = 0; r < 4; r++) {
+    img.valid[r] = false;
     for (int c = 0; c < MAX_IMG_WIDTH; c++)
       img.row[r][c] = 0;
-  File f = SD.open(path);
-  if (!f) return false;
-
-  uint8_t rowbuf[MAX_ROWBUF];
-  if (m.rowStride > (int)sizeof(rowbuf)) { f.close(); return false; }
+  }
 
   for (int vr = 0; vr < 4; ++vr) {
     const int visualRow = visualStart - (3 - vr);
-    if (visualRow < 0) break;
-
-    const int srcRow = m.bottomUp ? (m.H - 1 - visualRow) : visualRow;
-    const uint32_t rowOffset = m.fh.bfOffBits + (uint32_t)srcRow * m.rowStride;
-
-    f.seek(rowOffset);
-    if (f.read(rowbuf, m.rowStride) != (int)m.rowStride) { f.close(); return false; }
-
-    if (m.ih.biBitCount == 24) {
-      for (int c = 0; c < img.width; ++c) {
-        const int idx = c * 3;
-        const uint8_t B = rowbuf[idx + 0], G = rowbuf[idx + 1], R = rowbuf[idx + 2];
-        img.row[vr][c] = (uint8_t)(0.299f*R + 0.587f*G + 0.114f*B);
-      }
-    } else {
-      for (int c = 0; c < img.width; ++c) img.row[vr][c] = rowbuf[c];
-    }
+    // Outside the image (before row 0, or past the last row while the trailing
+    // slices finish exposing it): leave this slot blank/invalid, not an error.
+    if (visualRow < 0 || visualRow >= src.height) continue;
+    if (!src.readRow(visualRow, img.row[vr], img.width)) return false;
+    img.valid[vr] = true;
   }
-
-  f.close();
   return true;
 }
 
 void countdown_1s_tenths(const char* label) {
   oledHeader(label);
   display.setCursor(0, 20); display.print("Starting in:");
-  display.display();
+  display.sendBuffer();
   for (int i = 10; i >= 0; --i) {
-    display.fillRect(0, 35, 128, 20, SSD1306_BLACK);
+    display.setDrawColor(0); display.drawBox(0, 35, 128, 20); display.setDrawColor(1);
     display.setCursor(20, 35);
-    display.setTextSize(2);
+    // Closest u8g2 stand-in for Adafruit GFX's setTextSize(2); may need retuning to fit
+    // the 20px-tall cleared box once you see it on the actual panel.
+    display.setFont(u8g2_font_ncenB14_tr);
     displayPrintf(display, "%d.%d s", i/10, i%10);
-    display.setTextSize(1);
-    display.display();
+    display.setFont(u8g2_font_6x10_tf);
+    display.sendBuffer();
     delay(100);
   }
 }
@@ -540,7 +703,7 @@ void printEntireBMP(const String &path) {
   BMPMeta meta;
   if (!loadBMPMeta(path, meta)) {
     oledHeader("BMP"); display.setCursor(0,20); display.print("Header error");
-    display.setCursor(0,32); display.print(path); display.display(); delay(1200);
+    display.setCursor(0,32); display.print(path); display.sendBuffer(); delay(1200);
     return;
   }
 
@@ -552,9 +715,10 @@ void printEntireBMP(const String &path) {
   displayPrintf(display,"W=%d  H=%d", meta.W, meta.H);
   display.setCursor(0, 40); displayPrintf(display,"%d slices (4 rows ea.)", totalSlices);
   display.setCursor(0, 54); display.print("[Enter] Start  [-] Back");
-  display.display();
+  display.sendBuffer();
 
   while (true) {
+    if (checkEStop()) return;
     if (readButton(btnEnter)) break;
     if (readButton(btnMinus)) return;
     delay(10);
@@ -562,13 +726,14 @@ void printEntireBMP(const String &path) {
 
   countdown_1s_tenths("Starting Print");
   for (int slice = 0; slice < totalSlices; ++slice) {
+    if (eStopLatched || cancelRequested) return;
     const int visualStart = slice * 4;
     Image4x img;
     if (!readFourRowsAt(path, meta, visualStart, img)) {
       oledHeader("BMP");
       display.setCursor(0, 20);
       display.print("Read error at slice ");
-      display.print(slice+1); display.display(); delay(1200);
+      display.print(slice+1); display.sendBuffer(); delay(1200);
       return;
     }
 
@@ -577,9 +742,9 @@ void printEntireBMP(const String &path) {
     display.setCursor(0, 30);
     displayPrintf(display,"Slice %d/%d", slice+1, totalSlices);
     display.setCursor(0, 42); displayPrintf(display,"Rows %d..%d", visualStart, min(meta.H-1, visualStart+3));
-    display.display();
+    display.sendBuffer();
     const bool forward = (slice % 2 == 0);
-    doPrintBMPSliceSerpentine(img, forward, false);
+    doPrintBMPSliceSerpentine(img, forward, false, true);
     if (slice < totalSlices - 1) {
       bool none[4] = {false,false,false,false};
       char buf[24];
@@ -602,77 +767,69 @@ void printEntireBMP(const String &path) {
 
   oledHeader("Print");
   display.setCursor(0, 22); display.print("Entire image done.");
-  display.display();
+  display.sendBuffer();
   delay(1200);
 }
-void printEntireBMP_4by(const String &path) {
-  BMPMeta meta;
-  if (!loadBMPMeta(path, meta)) {
-    oledHeader("BMP ERROR"); display.setCursor(0,20); display.print("Header error");
-    display.display(); delay(4000); // 4 second pause to ensure you see it
+// The validated 4-pass interlaced print sequence -- shared by SD-file prints and
+// ESP32-triggered prints, driven purely off the RowSource interface so it doesn't care
+// which one it's got.
+static void printFromRowSource(RowSource &src, const String &label, bool skipStartPrompt) {
+  if (src.width <= 0 || src.height <= 0) {
+    oledHeader("Print Error"); display.setCursor(0, 20);
+    display.print("Bad image"); display.sendBuffer(); delay(2000);
     return;
   }
 
-  const int totalSlices = meta.H;
+  // The 4-row rolling window needs 3 extra trailing slices past the last real row so
+  // that row also accumulates its full 4x0.25 exposure (otherwise the last 3 rows of
+  // every print fade out, only receiving 75%/50%/25% of their dose).
+  const int totalSlices = src.height + 3;
 
-  oledHeader("Print (Four Passes)");
-  display.setCursor(0, 16); display.print(path);
-  display.setCursor(0, 28);
-  displayPrintf(display,"W=%d  H=%d", meta.W, meta.H);
-  display.setCursor(0, 40); displayPrintf(display,"%d passes (1 rows ea.)", totalSlices);
-  display.setCursor(0, 54); display.print("[Enter] Start  [-] Back");
-  display.display();
+  if (!skipStartPrompt) {
+    oledHeader("Print (Four Passes)");
+    display.setCursor(0, 16); display.print(label);
+    display.setCursor(0, 28);
+    displayPrintf(display,"W=%d  H=%d", src.width, src.height);
+    display.setCursor(0, 40); displayPrintf(display,"%d passes (1 rows ea.)", totalSlices);
+    display.setCursor(0, 54); display.print("[Enter] Start  [-] Back");
+    display.sendBuffer();
 
-  while (true) {
-    if (readButton(btnEnter)) break;
-    if (readButton(btnMinus)) return;
-    delay(10);
+    while (true) {
+      if (checkEStop()) return;
+      if (readButton(btnEnter)) break;
+      if (readButton(btnMinus)) return;
+      delay(10);
+    }
   }
 
   countdown_1s_tenths("Starting Print");
 
-  // ==========================================
-  // DEBUG CHECKPOINT 1: Did we survive the countdown?
-  // ==========================================
-  oledHeader("DEBUG 1"); display.setCursor(0, 20);
-  display.print("Countdown finished."); display.display(); delay(2000);
-
-  if (totalSlices <= 0) {
-     oledHeader("DEBUG ERROR"); display.setCursor(0, 20);
-     display.print("totalSlices is 0!"); display.display(); delay(4000);
-     return;
-  }
-
   for (int slice = 0; slice < totalSlices; ++slice) {
+    if (eStopLatched || cancelRequested) return;
     const int visualStart = slice;
     Image4x img;
-    
-    // ==========================================
-    // DEBUG CHECKPOINT 2: Can we read the file?
-    // ==========================================
-    if (!readFourRowsBy(path, meta, visualStart, img)) {
-      oledHeader("DEBUG ERROR");
-      display.setCursor(0, 16); display.print("readFourRowsBy FAILED");
+
+    if (!readFourRowsBy(src, visualStart, img)) {
+      oledHeader("Print Error");
+      display.setCursor(0, 16); display.print("Read failed");
       display.setCursor(0, 28); display.print("Slice: "); display.print(slice);
-      display.display(); delay(4000);
+      display.sendBuffer(); delay(2000);
       return;
     }
 
-    oledHeader("DEBUG 3"); display.setCursor(0, 20);
-    display.print("File read OK. Moving..."); display.display(); delay(1500);
+    // Row/temp are steady for the whole slice, so redraw them once here rather than
+    // on every column -- doPrintBMPSliceSerpentine only touches the footer LED/col row.
+    const int rowShown = min(slice + 1, src.height);
+    const int tempC = queryNanoLEDTempC();
+    oledHeader("Printing");
+    display.setCursor(0, 12); displayPrintf(display, "Row %d/%d", rowShown, src.height);
+    display.setCursor(70, 12);
+    if (tempC > -100) displayPrintf(display, "T:%dC", tempC); else display.print("T:--");
+    display.setCursor(0, 24); display.print(label);
+    display.sendBuffer();
 
     const bool forward = (slice % 2 == 0);
-    
-    // ==========================================
-    // THE DANGER ZONE: This enables motors & prints
-    // ==========================================
-    doPrintBMPSliceSerpentine(img, forward, true);
-
-    // ==========================================
-    // DEBUG CHECKPOINT 4: Did we survive the row?
-    // ==========================================
-    oledHeader("DEBUG 4"); display.setCursor(0, 20);
-    display.print("Row printed!"); display.display(); delay(1500);
+    doPrintBMPSliceSerpentine(img, forward, true, src.wantsInvert);
 
     if (slice < totalSlices - 1) {
       bool none[4] = {false,false,false,false};
@@ -685,8 +842,24 @@ void printEntireBMP_4by(const String &path) {
 
   oledHeader("Print");
   display.setCursor(0, 22); display.print("Entire image done.");
-  display.display();
-  delay(3000);
+  display.sendBuffer();
+  delay(1200);
+}
+
+void printEntireBMP_4by(const String &path) {
+  BMPFileRowSource src;
+  if (!src.open(path)) {
+    oledHeader("BMP ERROR"); display.setCursor(0,20); display.print("Header error");
+    display.sendBuffer(); delay(2000);
+    return;
+  }
+  printFromRowSource(src, path, false);
+}
+
+void printHexData_4by(int w, int h, const String &hexData, bool skipStartPrompt) {
+  HexRowSource src;
+  src.init(w, h, hexData);
+  printFromRowSource(src, "ESP32", skipStartPrompt);
 }
 
 /**
@@ -698,12 +871,13 @@ void printEntireBMP_4by(const String &path) {
  * interlaced printing is active (byRow), and sent to the Nano printhead via serial. 
  * The function waits for the Nano to finish exposing before stepping to the next pixel.
  * 
- * @param img     The Image4x buffer containing the pixel data for the current rows.
- * @param forward True to sweep forward (pixel 0 to end), false for reverse.
- * @param byRow   If true, reduces exposure by a factor of 4 (used for interlaced printing).
+ * @param img         The Image4x buffer containing the pixel data for the current rows.
+ * @param forward     True to sweep forward (pixel 0 to end), false for reverse.
+ * @param byRow       If true, reduces exposure by a factor of 4 (used for interlaced printing).
+ * @param applyInvert Whether CFG.invertImage should apply to this data (see RowSource::wantsInvert).
  */
 
-void doPrintBMPSliceSerpentine(Image4x &img, bool forward, bool byRow) {
+void doPrintBMPSliceSerpentine(Image4x &img, bool forward, bool byRow, bool applyInvert) {
   digitalWrite(PIN_EN, LOW);
 
   const float mm_per_pixel = MM_PER_PIXEL; 
@@ -724,13 +898,16 @@ void doPrintBMPSliceSerpentine(Image4x &img, bool forward, bool byRow) {
   const float expDiv = byRow ? 0.25f : 1.0f;
 
   for (int s = sStart; ; s += sStep) {
+    if (eStopLatched || cancelRequested) break;
     float x_carriage = s * step_mm;
     uint32_t durations[4] = {0, 0, 0, 0};
     bool willFire[4] = {false, false, false, false};
     int activeCount = 0;
 
     for (int k = 0; k < 4; k++) {
-      float x_led = x_carriage - k * led_spacing;
+      // (3 - k) ensures LED 3 has 0mm offset (Leading)
+      // and LED 0 has a 21mm offset (Trailing)
+      float x_led = x_carriage - (3 - k) * led_spacing;
       long x_led_mm = lround_double(x_led);
       
       // A pixel t is at t * mm_per_pixel.
@@ -738,9 +915,9 @@ void doPrintBMPSliceSerpentine(Image4x &img, bool forward, bool byRow) {
       // Since mm_per_pixel = 2.0, we check if x_led is even and >= 0.
       if (x_led_mm >= 0 && (x_led_mm % 2 == 0)) {
         int t = x_led_mm / 2;
-        if (t < img.width) {
+        if (t < img.width && img.valid[ ROW_FOR_LED[k] ]) {
           uint8_t v = img.row[ ROW_FOR_LED[k] ][t];
-          if (CFG.invertImage) v = 255 - v;
+          if (CFG.invertImage && applyInvert) v = 255 - v;
           const float dur_s = lutExposureFromByte(v) * expDiv;
           if (dur_s > 0.0f) { 
             durations[k] = (uint32_t)(dur_s * 1000000.0f);
@@ -752,8 +929,13 @@ void doPrintBMPSliceSerpentine(Image4x &img, bool forward, bool byRow) {
     }
 
     if (activeCount > 0) {
+      // LED 3 (k=3) is the leading LED with 0mm offset, so its target column is the
+      // most representative "current column" for the whole sweep at this instant.
+      int col = (int)(x_carriage / mm_per_pixel);
+      if (col < 0) col = 0;
+      if (col >= img.width) col = img.width - 1;
       char buf[32];
-      snprintf(buf, sizeof(buf), "X %.1fmm", x_carriage);
+      snprintf(buf, sizeof(buf), "Col %d/%d", col + 1, img.width);
       drawStatusRow(willFire, String(buf));
       sendBatchToPrinthead(durations);
       waitForPrinthead();
@@ -761,6 +943,111 @@ void doPrintBMPSliceSerpentine(Image4x &img, bool forward, bool byRow) {
 
     if (s == sEnd) break;
     stepN(steps_per_1mm, forward);
+  }
+
+  digitalWrite(PIN_EN, HIGH);
+}
+
+/**
+ * @brief Calibration pattern to isolate individual LEDs and reveal X-axis backlash.
+ *
+ * Rows 0-7: fires only LED 3 (the leading LED) at a fixed X target on alternating
+ * forward/backward passes. Any offset between the forward-pass and backward-pass marks
+ * is backlash. Rows 8-15: fires all 4 LEDs into 4 separate X bands (12mm apart) at
+ * 33/66/100% of maxTimeSec, so each LED's exposure response can be read independently.
+ *
+ * @param maxTimeSec Exposure duration used as the 100% reference for the gradient test.
+ */
+void printCalibrationPattern(float maxTimeSec) {
+  digitalWrite(PIN_EN, LOW);
+
+  // Constants to match your machine's physical reality
+  const float step_mm = 1.0f;
+  const float max_x_mm = 65.0f; // Wide enough for all LEDs to clear their test zones
+  const long steps_per_1mm = lround_double(step_mm * STEPS_PER_MM_X);
+  const int total_steps = (int)(max_x_mm / step_mm) + 1;
+
+  // We will print exactly 16 rows
+  for (int row = 0; row < 16; ++row) {
+    if (eStopLatched || cancelRequested) break;
+
+    bool forward = (row % 2 == 0);
+
+    if (forward) moveToSteps(0);
+    else         moveToSteps(lround_double(max_x_mm * STEPS_PER_MM_X));
+
+    int sStart = forward ? 0 : total_steps - 1;
+    int sEnd   = forward ? total_steps - 1 : 0;
+    int sStep  = forward ? 1 : -1;
+
+    for (int s = sStart; ; s += sStep) {
+      if (eStopLatched || cancelRequested) break;
+
+      float x_carriage = s * step_mm;
+      uint32_t durations[4] = {0, 0, 0, 0};
+      bool willFire[4] = {false, false, false, false};
+      int activeCount = 0;
+
+      for (int k = 0; k < 4; k++) {
+        // Using our confirmed physical X-axis mapping
+        float x_led = x_carriage - (3 - k) * LED_SPACING_MM;
+        long x_led_mm = lround_double(x_led);
+
+        // ==========================================
+        // TEST 1: THE BACKLASH "ZIPPER" (Rows 0-7)
+        // ==========================================
+        if (row < 8) {
+          // We fire ONLY LED 3 (Top) at exactly X = 10mm.
+          // Because we print bi-directionally, this will reveal backlash.
+          if (k == 3 && x_led_mm == 10) {
+            durations[k] = (uint32_t)(maxTimeSec * 1000000.0f);
+            willFire[k] = true;
+            activeCount++;
+          }
+        }
+        // ==========================================
+        // TEST 2: LED EXPOSURE GRADIENTS (Rows 8-15)
+        // ==========================================
+        else {
+          // We space the LEDs out into 4 distinct blocks across the paper
+          // LED 3 starts at 4mm, LED 2 at 16mm, LED 1 at 28mm, LED 0 at 40mm
+          int target_base_x = 4 + (3 - k) * 12;
+
+          // Print 3 pixels for each LED, scaling the exposure time based on maxTimeSec
+          if (x_led_mm == target_base_x) {
+            durations[k] = (uint32_t)(maxTimeSec * 0.33f * 1000000.0f); // 33% Density
+            willFire[k] = true;
+            activeCount++;
+          }
+          else if (x_led_mm == target_base_x + 2) {
+            durations[k] = (uint32_t)(maxTimeSec * 0.66f * 1000000.0f); // 66% Density
+            willFire[k] = true;
+            activeCount++;
+          }
+          else if (x_led_mm == target_base_x + 4) {
+            durations[k] = (uint32_t)(maxTimeSec * 1.00f * 1000000.0f); // 100% Density
+            willFire[k] = true;
+            activeCount++;
+          }
+        }
+      }
+
+      if (activeCount > 0) {
+        char buf[32];
+        snprintf(buf, sizeof(buf), "R%d X%.0fmm", row, x_carriage);
+        drawStatusRow(willFire, String(buf));
+        sendBatchToPrinthead(durations);
+        waitForPrinthead();
+      }
+
+      if (s == sEnd) break;
+      stepN(steps_per_1mm, forward);
+    }
+
+    if (eStopLatched || cancelRequested) break;
+
+    // Move down 1 pixel (2mm) for the next row
+    yMoveMM(MM_PER_PIXEL, true);
   }
 
   digitalWrite(PIN_EN, HIGH);

@@ -66,6 +66,7 @@ volatile bool zHomingActive = false;
 bool eStopLatched = false;
 String eStopCause = "";
 bool cancelRequested = false;
+bool espOnline = false;
 float LUT16[16] = { 0.00, 0.10, 0.20, 0.30, 0.40, 0.55, 0.70, 0.90, 1.10, 1.30, 1.60, 2.00, 2.50, 3.20, 4.00, 5.00 };
 float LED_SCALE[4] = {1.0, 1.0, 1.0, 1.0}; // Provide actual definitions
 int ROW_FOR_LED[4] = {3, 2, 1, 0};

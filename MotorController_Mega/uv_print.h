@@ -10,6 +10,7 @@ bool isZMaxSwitchPressed();
 // --- Emergency stop ---
 int queryNanoLimitMask();   // -1 = Nano not responding, else bit0=Z bit1=Y bit2=overtemp
 int queryNanoLEDTempC();    // -100 = Nano not responding, else printhead LED temp in C
+void reportEspIdleState();  // Tells the ESP32 STATE:ONLINE/OFFLINE per espOnline/eStopLatched
 bool checkEStop();          // Services the raw ISR flag; returns true if caller should abort its loop
 void clearEmergencyStop();  // Operator-initiated resume after inspecting the cause
 

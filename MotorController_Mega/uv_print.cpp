@@ -120,6 +120,13 @@ int queryNanoLEDTempC() {
   return -100; // Nano not responding -- caller should render this as "--" rather than a real reading.
 }
 
+// Tells the ESP32 the printer's idle state (never call this while actually PRINTING --
+// that's sent separately). Reports OFFLINE even if espOnline is still true whenever an
+// e-stop is latched, since the machine can't accept a new job until it's cleared.
+void reportEspIdleState() {
+  ESP_SERIAL.println((espOnline && !eStopLatched) ? "STATE:ONLINE" : "STATE:OFFLINE");
+}
+
 static String describeEStopCause(int mask) {
   if (mask < 0) return "NANO OFFLINE";
   if (mask == 0) return "UNKNOWN";
@@ -821,6 +828,8 @@ static void printFromRowSource(RowSource &src, const String &label, bool skipSta
     // on every column -- doPrintBMPSliceSerpentine only touches the footer LED/col row.
     const int rowShown = min(slice + 1, src.height);
     const int tempC = queryNanoLEDTempC();
+    ESP_SERIAL.print("PROGRESS:"); ESP_SERIAL.print(rowShown); ESP_SERIAL.print(",");
+    ESP_SERIAL.print(src.height); ESP_SERIAL.print("\n");
     oledHeader("Printing");
     display.setCursor(0, 12); displayPrintf(display, "Row %d/%d", rowShown, src.height);
     display.setCursor(70, 12);
@@ -846,6 +855,11 @@ static void printFromRowSource(RowSource &src, const String &label, bool skipSta
   delay(1200);
 }
 
+// The ESP32 (and its web UI) needs to know the printer is busy regardless of whether
+// this particular print was triggered from the SD browser or from the web UI itself --
+// otherwise a plain SD print would leave the web status bar showing stale "online" while
+// the machine is actually running. PRINTING always reverts to whatever espOnline was
+// beforehand once the print returns, by any of printFromRowSource's internal paths.
 void printEntireBMP_4by(const String &path) {
   BMPFileRowSource src;
   if (!src.open(path)) {
@@ -853,13 +867,17 @@ void printEntireBMP_4by(const String &path) {
     display.sendBuffer(); delay(2000);
     return;
   }
+  ESP_SERIAL.println("STATE:PRINTING");
   printFromRowSource(src, path, false);
+  reportEspIdleState();
 }
 
 void printHexData_4by(int w, int h, const String &hexData, bool skipStartPrompt) {
   HexRowSource src;
   src.init(w, h, hexData);
+  ESP_SERIAL.println("STATE:PRINTING");
   printFromRowSource(src, "ESP32", skipStartPrompt);
+  reportEspIdleState();
 }
 
 /**

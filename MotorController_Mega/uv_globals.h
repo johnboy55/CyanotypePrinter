@@ -76,6 +76,11 @@ extern volatile bool zHomingActive;          // True while a Z-contact touch is 
 extern bool eStopLatched;                    // True once a genuine e-stop is confirmed; requires operator clear
 extern String eStopCause;                    // Human-readable cause of the current latch, e.g. "Z", "Y", "OVERTEMP"
 extern bool cancelRequested;                 // Operator hit Back mid-move/print; abort the current operation only
+// Whether the attendant has put the printer "online" from the ESP32-mode menu. Tracked
+// globally (not just local to menuESP32Control) so the print engine -- which also runs
+// for plain SD-card prints, entirely outside that menu -- knows what state to report
+// back to the ESP32 once a print finishes: PRINTING always reverts to this.
+extern bool espOnline;
 extern float LUT16[16];
 extern float LED_SCALE[4];
 

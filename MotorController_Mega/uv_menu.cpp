@@ -725,16 +725,16 @@ static void runIncomingPrint(int w, int h, const String &hexData) {
 
 void menuESP32Control() {
   String ip = "waiting...";
-  bool online = false;
+  espOnline = false;
   int tempC = -100;
   unsigned long lastTempPoll = 0;
   String inBuf = "";
   bool redraw = true;
 
-  ESP_SERIAL.println("OFFLINE"); // In case a previous session left the ESP32 thinking it's online.
+  ESP_SERIAL.println("STATE:OFFLINE"); // In case a previous session left the ESP32 thinking it's online.
 
   while (true) {
-    if (checkEStop()) { if (online) ESP_SERIAL.println("OFFLINE"); return; }
+    if (checkEStop()) { if (espOnline) ESP_SERIAL.println("STATE:OFFLINE"); return; }
 
     // Drain lines from the ESP32: periodic "IP:..." broadcasts, and (while online)
     // a staged "P:w,h:hexdata" print command.
@@ -745,14 +745,18 @@ void menuESP32Control() {
         if (line.startsWith("IP:")) {
           ip = line.substring(3);
           redraw = true;
-        } else if (online && line.startsWith("P:")) {
+        } else if (espOnline && line.startsWith("P:")) {
           int comma = line.indexOf(','); int colon = line.indexOf(':', comma);
           int w = (comma > 0 && colon > 0) ? line.substring(2, comma).toInt() : 0;
           int h = (comma > 0 && colon > 0) ? line.substring(comma + 1, colon).toInt() : 0;
           if (comma > 0 && colon > 0 && w > 0 && h > 0) {
             String hexData = line.substring(colon + 1);
             runIncomingPrint(w, h, hexData);
-            ESP_SERIAL.println(eStopLatched ? "error" : "finish");
+            // Always report the definitive current state once runIncomingPrint returns --
+            // it may have declined at the alert/vacuum screen (never reaching PRINTING at
+            // all) or fully printed, and either way the ESP32 needs telling so a web UI
+            // that optimistically marked itself "printing" on dispatch doesn't get stuck.
+            reportEspIdleState();
             if (eStopLatched) return; // Let loop() show the e-stop screen instead of "Waiting...".
           } else {
             ESP_SERIAL.println("error");
@@ -771,23 +775,23 @@ void menuESP32Control() {
     }
 
     if (redraw) {
-      oledHeader(online ? "ESP32: ONLINE" : "ESP32: OFFLINE");
+      oledHeader(espOnline ? "ESP32: ONLINE" : "ESP32: OFFLINE");
       display.setCursor(0, 12); display.print("IP: "); display.print(ip);
       display.setCursor(0, 24);
       if (tempC > -100) displayPrintf(display, "LED Temp: %dC", tempC); else display.print("LED Temp: --");
-      display.setCursor(0, 40); display.print(online ? "Waiting for print..." : "[Enter] Go Online");
-      display.setCursor(0, 52); display.print(online ? "[Back] Go Offline" : "[Back] Exit");
+      display.setCursor(0, 40); display.print(espOnline ? "Waiting for print..." : "[Enter] Go Online");
+      display.setCursor(0, 52); display.print(espOnline ? "[Back] Go Offline" : "[Back] Exit");
       display.sendBuffer();
       redraw = false;
     }
 
-    if (readButton(btnEnter) && !online) {
-      online = true;
-      ESP_SERIAL.println("ONLINE");
+    if (readButton(btnEnter) && !espOnline) {
+      espOnline = true;
+      ESP_SERIAL.println("STATE:ONLINE");
       redraw = true;
     }
     if (readButton(btnBack)) {
-      if (online) { online = false; ESP_SERIAL.println("OFFLINE"); redraw = true; }
+      if (espOnline) { espOnline = false; ESP_SERIAL.println("STATE:OFFLINE"); redraw = true; }
       else return;
     }
 

@@ -37,15 +37,26 @@ WebServer server(80);
 #endif
 
 // --- Mega link state ---
-// The Mega drives this from its ESP32-mode menu: ONLINE/OFFLINE gate whether an
-// attendant is actually watching the printer, so we don't accept a print nobody
-// will notice arrived. printerBusy additionally blocks a second submission from
-// landing on top of one the Mega is still physically running.
-bool printerOnline = false;
-bool printerBusy = false;
+// The Mega drives this from its ESP32-mode menu / print engine. OFFLINE: nobody's
+// attending the printer. ONLINE: attendant is watching, idle, ready for a submission.
+// PRINTING: physically mid-print -- true whether this print was triggered from the web
+// UI or a plain SD-card print, so the web status bar can't go stale while the machine
+// is busy either way. Only ONLINE accepts a new /print submission.
+enum PrinterState { PS_OFFLINE, PS_ONLINE, PS_PRINTING };
+PrinterState printerState = PS_OFFLINE;
+int printProgressRow = 0;
+int printProgressTotal = 0;
 String megaInBuf = "";
 unsigned long lastIpBroadcast = 0;
 const unsigned long IP_BROADCAST_MS = 2000;
+
+const char* stateName(PrinterState s) {
+  switch (s) {
+    case PS_ONLINE:   return "ONLINE";
+    case PS_PRINTING: return "PRINTING";
+    default:          return "OFFLINE";
+  }
+}
 
 void sendIpToMega() {
   MEGA_SERIAL.print("IP:");
@@ -54,13 +65,21 @@ void sendIpToMega() {
 
 void handleMegaLine(String line) {
   line.trim();
-  if (line == "ONLINE") {
-    printerOnline = true;
-  } else if (line == "OFFLINE") {
-    printerOnline = false;
-  } else if (line == "finish" || line == "error") {
-    printerBusy = false;
+  if (line == "STATE:ONLINE") {
+    printerState = PS_ONLINE;
+  } else if (line == "STATE:OFFLINE") {
+    printerState = PS_OFFLINE;
+  } else if (line == "STATE:PRINTING") {
+    printerState = PS_PRINTING;
+  } else if (line.startsWith("PROGRESS:")) {
+    int comma = line.indexOf(',');
+    if (comma > 0) {
+      printProgressRow = line.substring(9, comma).toInt();
+      printProgressTotal = line.substring(comma + 1).toInt();
+    }
   }
+  // "finish"/"error" acks are superseded by the STATE:ONLINE/OFFLINE the Mega now sends
+  // right after every print -- nothing left to do with them here.
 }
 
 // ============================================================
@@ -93,11 +112,23 @@ const char index_html[] PROGMEM = R"rawliteral(
         .cell { width: 30px; height: 30px; border: 1px solid #ccc; box-sizing: border-box; }
         
         #status { font-size: 18px; font-weight: bold; color: #00ff00; min-height: 25px; }
+
+        #printer-status-bar { max-width: 400px; margin: 0 auto 20px auto; padding: 8px 14px; border-radius: 6px; font-size: 14px; font-weight: bold; text-align: left; }
+        #printer-status-bar.state-offline  { background: #442222; color: #ff8888; }
+        #printer-status-bar.state-online   { background: #1e3a1e; color: #7CFC7C; }
+        #printer-status-bar.state-printing { background: #24284d; color: #9db4ff; }
+        #printer-progress-track { display: none; margin-top: 6px; height: 8px; background: #111; border-radius: 4px; overflow: hidden; }
+        #printer-progress-fill { height: 100%; width: 0%; background: #4d79ff; transition: width 0.3s ease; }
+        button:disabled { opacity: 0.5; cursor: not-allowed; }
     </style>
 </head>
 <body>
     <h1>Design Your Print</h1>
     <div class="subtitle">Draw with 16 shades of UV intensity</div>
+    <div id="printer-status-bar" class="state-offline">
+        <span id="printer-state-text">Checking printer...</span>
+        <div id="printer-progress-track"><div id="printer-progress-fill"></div></div>
+    </div>
     <div class="controls">
         <div class="button-group">
             <select id="preset-select">
@@ -151,11 +182,49 @@ const presetSelect = document.getElementById('preset-select');
 const printBtn = document.getElementById('print-btn');
 const clearBtn = document.getElementById('clear-btn');
 const statusDiv = document.getElementById('status');
+const printerStatusBar = document.getElementById('printer-status-bar');
+const printerStateText = document.getElementById('printer-state-text');
+const printerProgressTrack = document.getElementById('printer-progress-track');
+const printerProgressFill = document.getElementById('printer-progress-fill');
 
 function init() {
     buildPalette();
     initGrid();
     setupEventListeners();
+    if (!isSimulated) {
+        pollPrinterStatus();
+        setInterval(pollPrinterStatus, 1500);
+    }
+}
+
+// Polls the Mega's live state (relayed through the ESP32) so the page reflects
+// Online/Offline/Printing plus row progress without the operator refreshing anything.
+function pollPrinterStatus() {
+    fetch('/status')
+        .then(r => r.json())
+        .then(data => {
+            printerStatusBar.className = 'state-' + data.state.toLowerCase();
+            if (data.state === 'PRINTING') {
+                const pct = data.total > 0 ? Math.round((data.row / data.total) * 100) : 0;
+                printerStateText.textContent = `Printing: row ${data.row} of ${data.total} (${pct}%)`;
+                printerProgressTrack.style.display = 'block';
+                printerProgressFill.style.width = pct + '%';
+                printBtn.disabled = true;
+            } else if (data.state === 'ONLINE') {
+                printerStateText.textContent = 'Printer online -- ready for a print';
+                printerProgressTrack.style.display = 'none';
+                printBtn.disabled = false;
+            } else {
+                printerStateText.textContent = 'Printer offline -- attendant is not watching it';
+                printerProgressTrack.style.display = 'none';
+                printBtn.disabled = true;
+            }
+        })
+        .catch(() => {
+            printerStatusBar.className = 'state-offline';
+            printerStateText.textContent = 'Cannot reach printer';
+            printerProgressTrack.style.display = 'none';
+        });
 }
 
 function buildPalette() {
@@ -285,12 +354,24 @@ void handleJS() {
   server.send(200, "application/javascript", app_js);
 }
 
+void handleStatus() {
+  StaticJsonDocument<128> doc;
+  doc["state"] = stateName(printerState);
+  if (printerState == PS_PRINTING) {
+    doc["row"] = printProgressRow;
+    doc["total"] = printProgressTotal;
+  }
+  String out;
+  serializeJson(doc, out);
+  server.send(200, "application/json", out);
+}
+
 void handlePrint() {
-  if (!printerOnline) {
+  if (printerState == PS_OFFLINE) {
     server.send(503, "text/plain", "Printer is offline -- attendant hasn't gone online yet");
     return;
   }
-  if (printerBusy) {
+  if (printerState == PS_PRINTING) {
     server.send(503, "text/plain", "Printer is busy with another print");
     return;
   }
@@ -331,7 +412,13 @@ void handlePrint() {
 
   // Fire over UART to the Mega!
   // Format exactly what Mega expects: "P:w,h:HEXDATA\n"
-  printerBusy = true;
+  // Mark PRINTING optimistically so a second submission can't sneak in during the
+  // (possibly long) wait for the attendant to confirm on the Mega; the Mega always
+  // reports back its definitive state once it's actually resolved this one, correcting
+  // this if the attendant ends up declining the print.
+  printerState = PS_PRINTING;
+  printProgressRow = 0;
+  printProgressTotal = 0;
   MEGA_SERIAL.print("P:");
   MEGA_SERIAL.print(w);
   MEGA_SERIAL.print(",");
@@ -364,6 +451,7 @@ void setup() {
   server.on("/", HTTP_GET, handleRoot);
   server.on("/app.js", HTTP_GET, handleJS);
   server.on("/print", HTTP_POST, handlePrint);
+  server.on("/status", HTTP_GET, handleStatus);
 
   server.begin();
   Serial.println("Web server started.");

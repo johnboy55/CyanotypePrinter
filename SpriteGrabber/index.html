@@ -25,7 +25,7 @@
             flex-direction: column;
         }
         #left-panel {
-            flex: 1;
+            flex: 1.5;
             overflow: hidden;
         }
         #right-panel {
@@ -37,6 +37,26 @@
             margin-bottom: 15px;
             align-items: center;
             flex-wrap: wrap;
+        }
+        .controls-row {
+            display: flex;
+            gap: 15px;
+            width: 100%;
+            align-items: center;
+            flex-wrap: wrap;
+        }
+        .preview-container {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            padding: 10px;
+            background: #f8f9fa;
+            border: 1px solid #ddd;
+            border-radius: 6px;
+        }
+        #previewCanvas {
+            background: #fff;
+            border: 1px solid #ccc;
         }
         #canvas-container {
             flex: 1;
@@ -83,31 +103,53 @@
             font-size: 14px;
             font-weight: bold;
         }
+        .checkbox-label {
+            display: flex;
+            align-items: center;
+            gap: 5px;
+            cursor: pointer;
+        }
     </style>
 </head>
 <body>
 
+    <!-- LEFT PANEL: Image and Controls -->
     <div id="left-panel" class="panel">
         <div class="controls">
-            <input type="file" id="imageLoader" accept="image/png, image/jpeg">
-            
-            <label for="scaleSlider">Scale:</label>
-            <input type="range" id="scaleSlider" min="5" max="40" value="20">
-            
-            <label for="sizeSelect">Size:</label>
-            <select id="sizeSelect">
-                <option value="8x8">8 x 8</option>
-                <option value="8x16">8 x 16</option>
-                <option value="16x16">16 x 16</option>
-            </select>
-            
-            <button id="processBtn">Process Selection</button>
+            <div class="controls-row">
+                <input type="file" id="imageLoader" accept="image/png, image/jpeg">
+                
+                <label for="scaleSlider">Scale:</label>
+                <input type="range" id="scaleSlider" min="5" max="40" value="20">
+                
+                <label for="sizeSelect">Size:</label>
+                <select id="sizeSelect">
+                    <option value="8x8">8 x 8</option>
+                    <option value="8x16">8 x 16</option>
+                    <option value="16x16">16 x 16</option>
+                </select>
+                
+                <button id="processBtn">Process Selection</button>
+            </div>
+           <div class="controls-row preview-container">
+                <label>Output Preview:</label>
+        <canvas id="previewCanvas"></canvas>
+        <label class="checkbox-label">
+            <input type="checkbox" id="normalizeCheck" checked>
+            Normalize
+        </label>
+        <label class="checkbox-label">
+            <input type="checkbox" id="invertCheck">
+            Invert
+        </label>
+        </div>
         </div>
         <div id="canvas-container">
             <canvas id="editorCanvas"></canvas>
         </div>
     </div>
 
+    <!-- RIGHT PANEL: JSON Output -->
     <div id="right-panel" class="panel">
         <div class="controls">
             <label>JSON Output</label>
@@ -125,6 +167,11 @@
         const canvas = document.getElementById('editorCanvas');
         const ctx = canvas.getContext('2d');
         const output = document.getElementById('output');
+        
+        // Preview elements
+        const previewCanvas = document.getElementById('previewCanvas');
+        const previewCtx = previewCanvas.getContext('2d');
+        const invertCheck = document.getElementById('invertCheck');
 
         let img = new Image();
         let scale = parseInt(scaleSlider.value);
@@ -133,9 +180,7 @@
         let selX = 0;
         let selY = 0;
         let isLocked = false;
-
-
-        // Data storage
+        
         let presets = {};
 
         // Update JSON output display
@@ -151,7 +196,6 @@
             output.value = jsonString;
         }
 
-        // Initialize output
         updateOutput();
 
         // Handle Image Upload
@@ -161,6 +205,7 @@
                 img.onload = function() {
                     selX = 0;
                     selY = 0;
+                    isLocked = false;
                     draw();
                 }
                 img.src = event.target.result;
@@ -168,24 +213,26 @@
             reader.readAsDataURL(e.target.files[0]);
         });
 
-        // Handle Scale Change
         scaleSlider.addEventListener('input', function() {
             scale = parseInt(this.value);
             draw();
         });
 
-        // Handle Size Selection
         sizeSelect.addEventListener('change', function() {
             const dims = this.value.split('x');
             selWidth = parseInt(dims[0]);
             selHeight = parseInt(dims[1]);
+            // Ensure bounds
+            if (selX + selWidth > img.width) selX = Math.max(0, img.width - selWidth);
+            if (selY + selHeight > img.height) selY = Math.max(0, img.height - selHeight);
             draw();
         });
+        
+        invertCheck.addEventListener('change', updatePreview);
 
         // Handle Canvas Hover (Moving Selection)
         canvas.addEventListener('mousemove', function(e) {
-            if (!img.src || isLocked) return; // Abort if no image or if locked
-            
+            if (!img.src || isLocked) return;
             const rect = canvas.getBoundingClientRect();
             const hoverX = e.clientX - rect.left;
             const hoverY = e.clientY - rect.top;
@@ -202,24 +249,20 @@
         // Handle Canvas Clicking (Lock/Unlock Selection)
         canvas.addEventListener('mousedown', function() {
             if (!img.src) return;
-            isLocked = !isLocked; // Toggle the lock state on click
-            draw(); // Redraw to update the box color
+            isLocked = !isLocked;
+            draw();
         });
-        
-        // Draw Image, Grid, and Selection
+
+        // Draw Image, Grid, Selection, and trigger Preview
         function draw() {
             if (!img.src) return;
             
             canvas.width = img.width * scale;
             canvas.height = img.height * scale;
             
-            // Disable smoothing for pixelated look
             ctx.imageSmoothingEnabled = false;
-            
-            // Draw image scaled up
             ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
             
-            // Draw dark grid lines
             ctx.strokeStyle = "rgba(0, 0, 0, 0.4)";
             ctx.lineWidth = 1;
             ctx.beginPath();
@@ -233,28 +276,23 @@
             }
             ctx.stroke();
 
-            // Draw selection box
-            ctx.strokeStyle = "rgba(255, 0, 0, 0.9)";
+            if (isLocked) {
+                ctx.strokeStyle = "rgba(40, 167, 69, 0.9)";
+            } else {
+                ctx.strokeStyle = "rgba(255, 0, 0, 0.9)";
+            }
             ctx.lineWidth = 3;
             ctx.strokeRect(selX * scale, selY * scale, selWidth * scale, selHeight * scale);
-            
-            // Highlight selection area slightly
             ctx.fillStyle = "rgba(255, 255, 255, 0.2)";
             ctx.fillRect(selX * scale, selY * scale, selWidth * scale, selHeight * scale);
+            
+            updatePreview();
         }
 
-        // Process Selection
-        processBtn.addEventListener('click', function() {
-            if (!img.src) {
-                alert("Please upload an image first.");
-                return;
-            }
-
-            const name = prompt("Enter a name for this sprite:");
-            if (!name) return; // Cancelled or empty
-
-            // We need to read the original pixels.
-            // Create an offscreen canvas at original 1:1 scale
+        // Logic extracted for reuse in preview and processing
+        function getProcessedPixels() {
+            if (!img.src) return [];
+            
             const offCanvas = document.createElement('canvas');
             offCanvas.width = img.width;
             offCanvas.height = img.height;
@@ -263,26 +301,86 @@
 
             const imageData = offCtx.getImageData(selX, selY, selWidth, selHeight).data;
             const pixels = [];
+            const brightnessValues = [];
+            
+            let minBrightness = 255;
+            let maxBrightness = 0;
 
             for (let i = 0; i < imageData.length; i += 4) {
-                let r = imageData[i];
-                let g = imageData[i+1];
-                let b = imageData[i+2];
                 let a = imageData[i+3];
-
                 if (a === 0) {
-                    pixels.push(0); // Transparent = 0
+                    brightnessValues.push(null);
                 } else {
-                    // Convert to grayscale: standard luminosity formula
+                    let r = imageData[i];
+                    let g = imageData[i+1];
+                    let b = imageData[i+2];
                     let brightness = (0.299 * r + 0.587 * g + 0.114 * b);
-                    // Map brightness (0=black, 255=white) to a 0-15 scale.
-                    // Assuming your format treats 15 as solid ink (black/dark) and 0 as empty (white).
-                    let val = Math.round(((255 - brightness) / 255) * 15);
-                    pixels.push(val);
+                    brightnessValues.push(brightness);
+                    
+                    if (brightness < minBrightness) minBrightness = brightness;
+                    if (brightness > maxBrightness) maxBrightness = brightness;
                 }
             }
 
-            // Save to presets
+            if (minBrightness === maxBrightness) {
+                minBrightness = 0;
+                maxBrightness = 255;
+            }
+
+            const isInverted = invertCheck.checked;
+
+            for (let i = 0; i < brightnessValues.length; i++) {
+                let bVal = brightnessValues[i];
+                if (bVal === null) {
+                    pixels.push(0);
+                } else {
+                    let normalizedScale = (bVal - minBrightness) / (maxBrightness - minBrightness);
+                    let val = Math.round((1 - normalizedScale) * 15);
+                    
+                    if (isInverted) {
+                        val = 15 - val;
+                    }
+                    
+                    pixels.push(val);
+                }
+            }
+            return pixels;
+        }
+
+        // Renders the calculated 0-15 array to the mini preview canvas
+        function updatePreview() {
+            if (!img.src) return;
+            const pixels = getProcessedPixels();
+            
+            const previewScale = 10; // 10 pixels visually per 1 output pixel
+            previewCanvas.width = selWidth * previewScale;
+            previewCanvas.height = selHeight * previewScale;
+            
+            for (let i = 0; i < pixels.length; i++) {
+                let val = pixels[i];
+                // Map 15 to 0 (black), and 0 to 255 (white)
+                let color = 255 - Math.round((val / 15) * 255); 
+                
+                previewCtx.fillStyle = `rgb(${color}, ${color}, ${color})`;
+                
+                let px = (i % selWidth) * previewScale;
+                let py = Math.floor(i / selWidth) * previewScale;
+                previewCtx.fillRect(px, py, previewScale, previewScale);
+            }
+        }
+
+        // Process Selection Button
+        processBtn.addEventListener('click', function() {
+            if (!img.src) {
+                alert("Please upload an image first.");
+                return;
+            }
+
+            const name = prompt("Enter a name for this sprite:");
+            if (!name) return;
+
+            const pixels = getProcessedPixels();
+
             presets[name] = {
                 width: selWidth,
                 height: selHeight,

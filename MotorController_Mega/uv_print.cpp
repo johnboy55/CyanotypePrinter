@@ -49,15 +49,30 @@ void sendBatchToPrinthead(uint32_t durations[4]) {
 }
 
 void waitForPrinthead() {
+  // Bounded by the longest dose the LUT can produce (LUT16[15]) plus slack for
+  // round-trip/poll overhead -- long enough that a legitimately long exposure never
+  // trips this, but short enough that a Nano that stops replying (dropped byte,
+  // firmware hang, etc.) surfaces as a diagnosable error instead of an indefinite
+  // freeze the operator can only escape by hitting Back.
+  const unsigned long timeoutMs = (unsigned long)(LUT16[15] * 1000.0f) + 3000;
+  unsigned long waitStart = millis();
+  String lastResponse = "(none)";
   bool isBusy = true;
   while (isBusy) {
     if (checkEStop() || checkCancel()) return;
+    if (millis() - waitStart > timeoutMs) {
+      Serial.print(F("[PRINTHEAD] no S:0 ack after "));
+      Serial.print(millis() - waitStart);
+      Serial.print(F("ms, last reply='")); Serial.print(lastResponse); Serial.println(F("'"));
+      return;
+    }
     PRINTHEAD_SERIAL.print("S\n");
     unsigned long timeout = millis();
     while (!PRINTHEAD_SERIAL.available() && millis() - timeout < 10) {}
     if (PRINTHEAD_SERIAL.available()) {
       String response = PRINTHEAD_SERIAL.readStringUntil('\n');
       response.trim();
+      lastResponse = response;
       if (response == "S:0") isBusy = false;
     }
   }
@@ -108,7 +123,13 @@ int queryNanoLimitMask() {
 int queryNanoLEDTempC() {
   PRINTHEAD_SERIAL.print("T\n");
   unsigned long timeout = millis();
-  while (!PRINTHEAD_SERIAL.available() && millis() - timeout < 100) {}
+  // Polled once a second from the ESP32-mode idle loop, which also needs to promptly
+  // drain ESP_SERIAL for an incoming "P:w,h:hexdata" print -- every ms spent blocked here
+  // is a ms that command can silently overflow the (small, unbuffered-by-flow-control)
+  // hardware RX buffer. The Nano's loop() answers "T" immediately with no blocking work
+  // of its own, so round-trip is normally low single-digit ms; 20ms is generous slack for
+  // that, not an attempt to tolerate a genuinely hung Nano.
+  while (!PRINTHEAD_SERIAL.available() && millis() - timeout < 20) {}
   if (PRINTHEAD_SERIAL.available()) {
     String resp = PRINTHEAD_SERIAL.readStringUntil('\n'); resp.trim();
     if (resp.startsWith("T:")) {
@@ -118,6 +139,13 @@ int queryNanoLEDTempC() {
     }
   }
   return -100; // Nano not responding -- caller should render this as "--" rather than a real reading.
+}
+
+// Tells the ESP32 the printer's idle state (never call this while actually PRINTING --
+// that's sent separately). Reports OFFLINE even if espOnline is still true whenever an
+// e-stop is latched, since the machine can't accept a new job until it's cleared.
+void reportEspIdleState() {
+  ESP_SERIAL.println((espOnline && !eStopLatched) ? "STATE:ONLINE" : "STATE:OFFLINE");
 }
 
 static String describeEStopCause(int mask) {
@@ -780,6 +808,19 @@ static void printFromRowSource(RowSource &src, const String &label, bool skipSta
     return;
   }
 
+  // Confirm the printhead (Nano) is actually answering before committing to a full print --
+  // otherwise a dead/disconnected link means every exposure silently does nothing (LEDs
+  // never fire, since sendBatchToPrinthead's commands just vanish into an unresponsive
+  // UART) and the operator only finds out after watching the whole thing run to "done".
+  if (queryNanoLEDTempC() <= -100) {
+    oledHeader("Print Error");
+    display.setCursor(0, 20); display.print("Printhead not responding");
+    display.setCursor(0, 32); display.print("Check Nano link/power");
+    display.sendBuffer(); delay(2500);
+    Serial.println(F("[PRINT] Aborting: printhead (Nano) unresponsive to T query"));
+    return;
+  }
+
   // The 4-row rolling window needs 3 extra trailing slices past the last real row so
   // that row also accumulates its full 4x0.25 exposure (otherwise the last 3 rows of
   // every print fade out, only receiving 75%/50%/25% of their dose).
@@ -821,6 +862,8 @@ static void printFromRowSource(RowSource &src, const String &label, bool skipSta
     // on every column -- doPrintBMPSliceSerpentine only touches the footer LED/col row.
     const int rowShown = min(slice + 1, src.height);
     const int tempC = queryNanoLEDTempC();
+    ESP_SERIAL.print("PROGRESS:"); ESP_SERIAL.print(rowShown); ESP_SERIAL.print(",");
+    ESP_SERIAL.print(src.height); ESP_SERIAL.print("\n");
     oledHeader("Printing");
     display.setCursor(0, 12); displayPrintf(display, "Row %d/%d", rowShown, src.height);
     display.setCursor(70, 12);
@@ -846,6 +889,11 @@ static void printFromRowSource(RowSource &src, const String &label, bool skipSta
   delay(1200);
 }
 
+// The ESP32 (and its web UI) needs to know the printer is busy regardless of whether
+// this particular print was triggered from the SD browser or from the web UI itself --
+// otherwise a plain SD print would leave the web status bar showing stale "online" while
+// the machine is actually running. PRINTING always reverts to whatever espOnline was
+// beforehand once the print returns, by any of printFromRowSource's internal paths.
 void printEntireBMP_4by(const String &path) {
   BMPFileRowSource src;
   if (!src.open(path)) {
@@ -853,13 +901,17 @@ void printEntireBMP_4by(const String &path) {
     display.sendBuffer(); delay(2000);
     return;
   }
+  ESP_SERIAL.println("STATE:PRINTING");
   printFromRowSource(src, path, false);
+  reportEspIdleState();
 }
 
 void printHexData_4by(int w, int h, const String &hexData, bool skipStartPrompt) {
   HexRowSource src;
   src.init(w, h, hexData);
+  ESP_SERIAL.println("STATE:PRINTING");
   printFromRowSource(src, "ESP32", skipStartPrompt);
+  reportEspIdleState();
 }
 
 /**

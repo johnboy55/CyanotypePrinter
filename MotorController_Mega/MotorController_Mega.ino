@@ -50,6 +50,7 @@ float LED_SPACING_MM = 7.0f;
 int OFFSET_PIXELS = 0;
 int STEP_PULSE_US = 5;                 
 int STEP_PERIOD_US = 1000;
+const float PAPER_LOAD_Y_MM = 80.0f;
 
 long currentSteps = 0; 
 long currentStepsY = 0;
@@ -66,6 +67,7 @@ volatile bool zHomingActive = false;
 bool eStopLatched = false;
 String eStopCause = "";
 bool cancelRequested = false;
+bool espOnline = false;
 float LUT16[16] = { 0.00, 0.10, 0.20, 0.30, 0.40, 0.55, 0.70, 0.90, 1.10, 1.30, 1.60, 2.00, 2.50, 3.20, 4.00, 5.00 };
 float LED_SCALE[4] = {1.0, 1.0, 1.0, 1.0}; // Provide actual definitions
 int ROW_FOR_LED[4] = {3, 2, 1, 0};

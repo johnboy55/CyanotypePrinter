@@ -1,6 +1,19 @@
 #ifndef UV_GLOBALS_H
 #define UV_GLOBALS_H
 
+// Must be defined before Arduino.h/HardwareSerial.h are first pulled in (this header is
+// that first touchpoint for every .cpp in the sketch). Default AVR RX buffer is only 64
+// bytes with no flow control, giving a little headroom against a blocking wait elsewhere
+// (e.g. queryNanoLEDTempC's poll of the Nano) stalling ESP_SERIAL reads.
+// IMPORTANT: keep this <=256. Past 256, HardwareSerial.h widens its ring-buffer index
+// from uint8_t to uint16_t -- but only on AVR cores new enough to have that adaptive
+// typedef. On an older core, a >256 buffer with 8-bit indices wraps at 256 while the
+// array is actually larger, desyncing the ring buffer and losing *more* data than the
+// default, not less. This is real headroom (2x default) without touching that boundary;
+// the actual fix for large payloads is not blocking ESP_SERIAL reads for so long (see
+// queryNanoLEDTempC's timeout), not a bigger buffer.
+#define SERIAL_RX_BUFFER_SIZE 128
+
 #include <Arduino.h>
 #include <Wire.h>
 #include <SPI.h>
@@ -64,6 +77,7 @@ extern float MM_PER_PIXEL;
 extern int STEPS_PER_PIXEL, OFFSET_PIXELS;
 extern float LED_SPACING_MM;
 extern int STEP_PULSE_US, STEP_PERIOD_US;
+extern const float PAPER_LOAD_Y_MM;
 
 extern long currentSteps, currentStepsY, currentStepsZ;
 extern const int MESH_SIZE; 

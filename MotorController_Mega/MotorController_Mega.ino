@@ -50,6 +50,7 @@ float LED_SPACING_MM = 7.0f;
 int OFFSET_PIXELS = 0;
 int STEP_PULSE_US = 5;                 
 int STEP_PERIOD_US = 1000;
+const float PAPER_LOAD_Y_MM = 80.0f;
 
 long currentSteps = 0; 
 long currentStepsY = 0;

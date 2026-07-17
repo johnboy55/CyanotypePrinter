@@ -49,15 +49,30 @@ void sendBatchToPrinthead(uint32_t durations[4]) {
 }
 
 void waitForPrinthead() {
+  // Bounded by the longest dose the LUT can produce (LUT16[15]) plus slack for
+  // round-trip/poll overhead -- long enough that a legitimately long exposure never
+  // trips this, but short enough that a Nano that stops replying (dropped byte,
+  // firmware hang, etc.) surfaces as a diagnosable error instead of an indefinite
+  // freeze the operator can only escape by hitting Back.
+  const unsigned long timeoutMs = (unsigned long)(LUT16[15] * 1000.0f) + 3000;
+  unsigned long waitStart = millis();
+  String lastResponse = "(none)";
   bool isBusy = true;
   while (isBusy) {
     if (checkEStop() || checkCancel()) return;
+    if (millis() - waitStart > timeoutMs) {
+      Serial.print(F("[PRINTHEAD] no S:0 ack after "));
+      Serial.print(millis() - waitStart);
+      Serial.print(F("ms, last reply='")); Serial.print(lastResponse); Serial.println(F("'"));
+      return;
+    }
     PRINTHEAD_SERIAL.print("S\n");
     unsigned long timeout = millis();
     while (!PRINTHEAD_SERIAL.available() && millis() - timeout < 10) {}
     if (PRINTHEAD_SERIAL.available()) {
       String response = PRINTHEAD_SERIAL.readStringUntil('\n');
       response.trim();
+      lastResponse = response;
       if (response == "S:0") isBusy = false;
     }
   }
@@ -108,7 +123,13 @@ int queryNanoLimitMask() {
 int queryNanoLEDTempC() {
   PRINTHEAD_SERIAL.print("T\n");
   unsigned long timeout = millis();
-  while (!PRINTHEAD_SERIAL.available() && millis() - timeout < 100) {}
+  // Polled once a second from the ESP32-mode idle loop, which also needs to promptly
+  // drain ESP_SERIAL for an incoming "P:w,h:hexdata" print -- every ms spent blocked here
+  // is a ms that command can silently overflow the (small, unbuffered-by-flow-control)
+  // hardware RX buffer. The Nano's loop() answers "T" immediately with no blocking work
+  // of its own, so round-trip is normally low single-digit ms; 20ms is generous slack for
+  // that, not an attempt to tolerate a genuinely hung Nano.
+  while (!PRINTHEAD_SERIAL.available() && millis() - timeout < 20) {}
   if (PRINTHEAD_SERIAL.available()) {
     String resp = PRINTHEAD_SERIAL.readStringUntil('\n'); resp.trim();
     if (resp.startsWith("T:")) {
@@ -784,6 +805,19 @@ static void printFromRowSource(RowSource &src, const String &label, bool skipSta
   if (src.width <= 0 || src.height <= 0) {
     oledHeader("Print Error"); display.setCursor(0, 20);
     display.print("Bad image"); display.sendBuffer(); delay(2000);
+    return;
+  }
+
+  // Confirm the printhead (Nano) is actually answering before committing to a full print --
+  // otherwise a dead/disconnected link means every exposure silently does nothing (LEDs
+  // never fire, since sendBatchToPrinthead's commands just vanish into an unresponsive
+  // UART) and the operator only finds out after watching the whole thing run to "done".
+  if (queryNanoLEDTempC() <= -100) {
+    oledHeader("Print Error");
+    display.setCursor(0, 20); display.print("Printhead not responding");
+    display.setCursor(0, 32); display.print("Check Nano link/power");
+    display.sendBuffer(); delay(2500);
+    Serial.println(F("[PRINT] Aborting: printhead (Nano) unresponsive to T query"));
     return;
   }
 

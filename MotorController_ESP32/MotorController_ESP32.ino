@@ -136,6 +136,7 @@ const char index_html[] PROGMEM = R"rawliteral(
                 <option value="invader">Atari: Invader</option>
                 <option value="star">Nintendo: Star</option>
                 <option value="c64sword">C64: Sword</option>
+                <option value="mario">Mario</option>
             </select>
             <select id="size-select">
                 <option value="8x8">8 x 8</option>
@@ -170,7 +171,8 @@ let currentH = 8;
 const presets = {
     'invader': { width: 8, height: 8, pixels: [0,0,0,15,15,0,0,0, 0,0,15,15,15,15,0,0, 0,15,15,15,15,15,15,0, 15,15,0,15,15,0,15,15, 15,15,15,15,15,15,15,15, 0,0,15,0,0,15,0,0, 0,15,15,0,0,15,15,0, 15,15,0,0,0,0,15,15] },
     'star': { width: 8, height: 8, pixels: [0,0,0,15,15,0,0,0, 0,0,15,7,7,15,0,0, 0,15,7,7,7,7,15,0, 15,15,15,15,15,15,15,15, 0,0,15,7,7,15,0,0, 0,15,15,0,0,15,15,0, 15,15,0,0,0,0,15,15, 15,0,0,0,0,0,0,15] },
-    'c64sword': { width: 8, height: 8, pixels: [0,0,0,0,0,0,15,0, 0,0,0,0,0,15,15,15, 0,0,0,0,15,15,15,0, 0,0,0,15,15,15,0,0, 0,0,15,15,15,0,0,0, 0,15,15,15,0,0,0,0, 15,15,0,0,0,0,0,0, 0,0,0,0,0,0,0,0] }
+    'c64sword': { width: 8, height: 8, pixels: [0,0,0,0,0,0,15,0, 0,0,0,0,0,15,15,15, 0,0,0,0,15,15,15,0, 0,0,0,15,15,15,0,0, 0,0,15,15,15,0,0,0, 0,15,15,15,0,0,0,0, 15,15,0,0,0,0,0,0, 0,0,0,0,0,0,0,0] },
+    'mario': { width: 16, height: 16, pixels: [6,6,6,6,6,10,10,10,10,10,6,6,6,6,6,6,6,6,6,6,10,10,10,10,10,10,10,10,10,6,6,6,6,6,6,6,9,9,9,5,5,9,5,6,6,6,6,6,6,6,6,9,5,9,5,5,5,9,5,5,5,6,6,6,6,6,6,9,5,9,9,5,5,5,9,5,5,5,6,6,6,6,6,9,9,5,5,5,5,9,9,9,9,6,6,6,6,6,6,6,6,5,5,5,5,5,5,5,6,6,6,6,6,6,6,6,9,9,10,9,9,9,6,6,6,6,6,6,6,6,6,9,9,9,10,9,9,10,9,9,9,6,6,6,6,6,9,9,9,9,10,10,10,10,9,9,9,9,6,6,6,6,5,5,9,10,5,10,10,5,10,9,5,5,6,6,6,6,5,5,5,10,10,10,10,10,10,5,5,5,6,6,6,6,5,5,10,10,10,10,10,10,10,10,5,5,6,6,6,6,6,6,10,10,10,6,6,10,10,10,6,6,6,6,6,6,6,9,9,9,6,6,6,6,9,9,9,6,6,6,6,6,9,9,9,9,6,6,6,6,9,9,9,9,6,6] }
 };
 
 const urlParams = new URLSearchParams(window.location.search);
@@ -366,6 +368,54 @@ void handleStatus() {
   server.send(200, "application/json", out);
 }
 
+// --- Chunked stop-and-wait transfer to the Mega ---
+// Sending the whole hex payload in one burst risks overrunning the Mega's small hardware
+// serial buffer if it's blocked elsewhere (no flow control) when the burst lands. Sending
+// <=32 hex chars at a time and waiting for an explicit ack before the next chunk means no
+// single burst can ever be more than one small chunk, regardless of how long the Mega
+// takes to get back to us.
+const int MEGA_CHUNK_SIZE = 32;
+
+// Blocks (with periodic yield() so the WiFi stack doesn't trip a watchdog reset) until a
+// full line arrives from the Mega or timeoutMs elapses. Returns false on timeout.
+bool waitForMegaLine(String &out, unsigned long timeoutMs) {
+  unsigned long start = millis();
+  out = "";
+  while (millis() - start < timeoutMs) {
+    while (MEGA_SERIAL.available()) {
+      char c = MEGA_SERIAL.read();
+      if (c == '\n') { out.trim(); return true; }
+      out += c;
+    }
+    yield();
+  }
+  return false;
+}
+
+// Runs the PSTART/D/PEND handshake. Returns false on any timeout or Mega-reported error;
+// the caller should then treat the print as never having reached the Mega.
+bool sendPrintChunked(int w, int h, const String &hexData) {
+  MEGA_SERIAL.print("PSTART:"); MEGA_SERIAL.print(w); MEGA_SERIAL.print(",");
+  MEGA_SERIAL.print(h); MEGA_SERIAL.print(","); MEGA_SERIAL.print(hexData.length());
+  MEGA_SERIAL.print("\n");
+
+  String resp;
+  if (!waitForMegaLine(resp, 2000) || resp != "READY") return false;
+
+  int total = hexData.length();
+  for (int sent = 0; sent < total; ) {
+    int n = min(MEGA_CHUNK_SIZE, total - sent);
+    MEGA_SERIAL.print("D:");
+    MEGA_SERIAL.print(hexData.substring(sent, sent + n));
+    MEGA_SERIAL.print("\n");
+    if (!waitForMegaLine(resp, 1000) || resp != "OK") return false;
+    sent += n;
+  }
+
+  MEGA_SERIAL.print("PEND\n");
+  return true; // Mega now owns the rest of the flow (attendant confirm, print, homing).
+}
+
 void handlePrint() {
   if (printerState == PS_OFFLINE) {
     server.send(503, "text/plain", "Printer is offline -- attendant hasn't gone online yet");
@@ -410,8 +460,6 @@ void handlePrint() {
     hexData += String(v, HEX); // Converts 0-15 to 0-F seamlessly
   }
 
-  // Fire over UART to the Mega!
-  // Format exactly what Mega expects: "P:w,h:HEXDATA\n"
   // Mark PRINTING optimistically so a second submission can't sneak in during the
   // (possibly long) wait for the attendant to confirm on the Mega; the Mega always
   // reports back its definitive state once it's actually resolved this one, correcting
@@ -419,13 +467,14 @@ void handlePrint() {
   printerState = PS_PRINTING;
   printProgressRow = 0;
   printProgressTotal = 0;
-  MEGA_SERIAL.print("P:");
-  MEGA_SERIAL.print(w);
-  MEGA_SERIAL.print(",");
-  MEGA_SERIAL.print(h);
-  MEGA_SERIAL.print(":");
-  MEGA_SERIAL.print(hexData);
-  MEGA_SERIAL.print("\n");
+
+  if (!sendPrintChunked(w, h, hexData)) {
+    // Never reached the Mega (or it aborted mid-transfer) -- it never entered PRINTING,
+    // so we're still just idle-online, not actually busy.
+    printerState = PS_ONLINE;
+    server.send(502, "text/plain", "Failed to transfer print to Mega");
+    return;
+  }
 
   server.send(200, "text/plain", "Print command dispatched!");
 }

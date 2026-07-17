@@ -50,34 +50,51 @@ void drawStatusRow(const bool ledOn[4], const String &rightText) {
   display.setCursor(rx, y); display.print(rightText); display.sendBuffer();
 }
 
-bool listFilesToOLED(const char* folder, const char* extFilter, String &picked) {
+// Walks folder once, invoking visit(name, matchIndex) for each entry matching extLower.
+// Kept to a single small stack frame (one File, one name buffer) rather than caching
+// every matching name in a stack-resident array -- with only ~1.2KB free for stack+heap
+// combined on the Mega, a 64-entry String[] here was enough to collide with the heap and
+// corrupt SD state by the time the operator navigated to this screen (boot-time listing
+// worked fine since it ran before anything else had fragmented that headroom).
+template <typename Visitor>
+static void forEachMatchingFile(const char* folder, const String &extLower, Visitor visit) {
   File dir = SD.open(folder);
-  if (!dir || !dir.isDirectory()) {
-    oledHeader("SD error");
-    display.setCursor(0, 20); display.print("Missing folder:");
-    display.setCursor(0, 30); display.print(folder);
-    display.sendBuffer(); delay(1500);
-    if (dir) dir.close();
-    return false;
-  }
-  char _filename[64];
-  const int MAX_FILES = 64;
-  String files[MAX_FILES]; int count = 0;
-
+  if (!dir || !dir.isDirectory()) { if (dir) dir.close(); return; }
+  char nameBuf[64];
+  int matchIndex = 0;
   File f;
   while ( (f = dir.openNextFile()) ) {
     if (!f.isDirectory()) {
-      f.getName(_filename, sizeof(_filename));
-      String name = String(_filename);
-      String low = name; low.toLowerCase();
-      String ext = String(extFilter); ext.toLowerCase();
-      if (ext.length() == 0 || low.endsWith(ext)) {
-        if (count < MAX_FILES) files[count++] = name;
+      f.getName(nameBuf, sizeof(nameBuf));
+      String low(nameBuf); low.toLowerCase();
+      if (extLower.length() == 0 || low.endsWith(extLower)) {
+        if (!visit(nameBuf, matchIndex)) { f.close(); break; }
+        matchIndex++;
       }
     }
     f.close();
   }
   dir.close();
+}
+
+bool listFilesToOLED(const char* folder, const char* extFilter, String &picked) {
+  String extLower(extFilter); extLower.toLowerCase();
+
+  {
+    File dir = SD.open(folder);
+    bool isDir = dir && dir.isDirectory();
+    if (dir) dir.close();
+    if (!isDir) {
+      oledHeader("SD error");
+      display.setCursor(0, 20); display.print("Missing folder:");
+      display.setCursor(0, 30); display.print(folder);
+      display.sendBuffer(); delay(1500);
+      return false;
+    }
+  }
+
+  int count = 0;
+  forEachMatchingFile(folder, extLower, [&](const char*, int) { count++; return true; });
 
   if (count == 0) {
     oledHeader("No files");
@@ -89,16 +106,22 @@ bool listFilesToOLED(const char* folder, const char* extFilter, String &picked) 
   }
 
   int idx = 0;
+  char selected[64];
   while (true) {
+    forEachMatchingFile(folder, extLower, [&](const char* name, int i) {
+      if (i == idx) { strncpy(selected, name, sizeof(selected)); selected[sizeof(selected)-1] = 0; return false; }
+      return true;
+    });
+
     oledHeader("Select file");
     display.setCursor(0, 20); display.print(folder);
-    display.setCursor(0, 35); display.print(files[idx]);
+    display.setCursor(0, 35); display.print(selected);
     display.setCursor(0, 55); display.print("[+/-] move [Ent] ok [Back] x");
     display.sendBuffer();
 
     if (readButton(btnPlus))  { idx = (idx + 1) % count; }
     if (readButton(btnMinus)) { idx = (idx - 1 + count) % count; }
-    if (readButton(btnEnter)) { picked = String(folder) + "/" + files[idx]; return true; }
+    if (readButton(btnEnter)) { picked = String(folder) + "/" + selected; return true; }
     if (readButton(btnBack))  { return false; }
     delay(10);
   }
@@ -661,15 +684,55 @@ void menuUtilities() {
   }
 }
 
+// 4x4 ordered (Bayer) dither matrix, values 0-15 -- lets a single-bit OLED approximate
+// the incoming print's 16 grayscale levels by pixel density instead of a hard threshold,
+// so a genuinely mid-gray source pixel doesn't look identical to solid black or white.
+static const uint8_t BAYER4[4][4] = {
+  { 0,  8,  2, 10},
+  {12,  4, 14,  6},
+  { 3, 11,  1,  9},
+  {15,  7, 13,  5},
+};
+
+// Renders a quick dithered thumbnail of exactly the hex payload as received -- no invert
+// applied, since this is meant to show the raw data that arrived (for diagnosing a bad
+// transfer/encoding), not the post-processed exposure. Scales to fit within the given
+// box and centers within it; degrades gracefully (coarser dither) for larger images.
+static void drawImagePreview(int w, int h, const String &hexData, int boxX, int boxY, int boxW, int boxH) {
+  int blockSize = min(boxW / max(1, w), boxH / max(1, h));
+  if (blockSize < 1) blockSize = 1;
+  if (blockSize > 10) blockSize = 10;
+  int x0 = boxX + (boxW - blockSize * w) / 2;
+  int y0 = boxY + (boxH - blockSize * h) / 2;
+
+  for (int r = 0; r < h; r++) {
+    for (int c = 0; c < w; c++) {
+      int idx = r * w + c;
+      uint8_t v = (idx < (int)hexData.length()) ? (uint8_t)(hexCharToVal(hexData[idx]) * 17) : 0;
+      uint8_t level = v >> 4; // 0-15
+      for (int by = 0; by < blockSize; by++) {
+        for (int bx = 0; bx < blockSize; bx++) {
+          if (BAYER4[by % 4][bx % 4] < level) {
+            display.drawPixel(x0 + c * blockSize + bx, y0 + r * blockSize + by);
+          }
+        }
+      }
+    }
+  }
+}
+
 // Runs once a validated "P:w,h:hexdata" arrives while online: alerts the attendant,
-// lets them stage paper on the vacuum bed (toggling the two blower relays), then prints
-// and returns the carriage home. Returns to the idle online screen on cancel/e-stop too.
+// clears the gantry so paper can go on, seats it with vacuum once confirmed, prints,
+// and returns the carriage home in X and Y (Z is never touched automatically -- only
+// by manual operator adjustment). Returns to the idle online screen on cancel/e-stop too.
 static void runIncomingPrint(int w, int h, const String &hexData) {
   buzzPrintIncoming();
   oledHeader("Print Incoming");
-  display.setCursor(0, 20); display.print("Place paper on bed");
-  display.setCursor(0, 48); display.print("[Enter] Continue");
-  display.setCursor(0, 56); display.print("[Back] Cancel print");
+  // W/H/Len as actually parsed off the wire -- the fastest way to tell a bad transfer
+  // (wrong dimensions, truncated/oversized hex string) apart from a bad source image.
+  display.setCursor(0, 12); displayPrintf(display, "W=%d H=%d Len=%d", w, h, (int)hexData.length());
+  drawImagePreview(w, h, hexData, 0, 22, 128, 30);
+  display.setCursor(0, 54); display.print("[Ent]Print [Back]x");
   display.sendBuffer();
   while (true) {
     if (checkEStop()) return;
@@ -678,17 +741,21 @@ static void runIncomingPrint(int w, int h, const String &hexData) {
     delay(10);
   }
 
-  bool fan1On = true, fan2On = true;
-  setVacRelay(PIN_VAC_RELAY_1, true);
-  setVacRelay(PIN_VAC_RELAY_2, true);
+  // Clear the bed so the attendant can place paper -- vacuum stays off here since
+  // suction fights positioning the sheet; +/- lets them pre-activate a fan if it helps
+  // hold an edge while placing it.
+  oledHeader("Load Paper"); display.setCursor(0, 20); display.print("Moving clear..."); display.sendBuffer();
+  yMoveMM(PAPER_LOAD_Y_MM, true);
+
+  bool fan1On = false, fan2On = false;
   bool redraw = true;
   while (true) {
     if (checkEStop()) { setVacRelay(PIN_VAC_RELAY_1, false); setVacRelay(PIN_VAC_RELAY_2, false); return; }
     if (redraw) {
-      oledHeader("Seat Paper");
+      oledHeader("Place Paper");
       display.setCursor(0, 14); display.print("Fan 1: "); display.print(fan1On ? "ON" : "off");
       display.setCursor(0, 24); display.print("Fan 2: "); display.print(fan2On ? "ON" : "off");
-      display.setCursor(0, 40); display.print("[+/-] Fans  [Ent] Start");
+      display.setCursor(0, 40); display.print("[+/-] Fans  [Ent] Placed");
       display.setCursor(0, 50); display.print("[Back] Cancel print");
       display.sendBuffer();
       redraw = false;
@@ -702,9 +769,21 @@ static void runIncomingPrint(int w, int h, const String &hexData) {
       else if (!fan2On) { fan2On = true; setVacRelay(PIN_VAC_RELAY_2, true); redraw = true; }
     }
     if (readButton(btnEnter)) break;
-    if (readButton(btnBack)) { setVacRelay(PIN_VAC_RELAY_1, false); setVacRelay(PIN_VAC_RELAY_2, false); return; }
+    if (readButton(btnBack)) {
+      setVacRelay(PIN_VAC_RELAY_1, false); setVacRelay(PIN_VAC_RELAY_2, false);
+      moveYToZero();
+      return;
+    }
     delay(10);
   }
+
+  // Paper's placed and confirmed: bring the vacuum up fully (the print itself needs full
+  // suction regardless of whatever was toggled while positioning the sheet) and return
+  // the carriage home before printing.
+  setVacRelay(PIN_VAC_RELAY_1, true);
+  setVacRelay(PIN_VAC_RELAY_2, true);
+  oledHeader("Homing"); display.setCursor(0, 20); display.print("Returning to origin"); display.sendBuffer();
+  moveYToZero();
 
   // The attendant already confirmed above, so skip the print engine's own start prompt.
   printHexData_4by(w, h, hexData, true);
@@ -717,6 +796,7 @@ static void runIncomingPrint(int w, int h, const String &hexData) {
   cancelRequested = false;
   if (completedOk) buzzPrintSuccess();
 
+  // X and Y always return home after a print; Z is never moved automatically.
   oledHeader("Homing"); display.setCursor(0, 20); display.print("Returning to origin"); display.sendBuffer();
   moveToSteps(0);
   moveYToZero();
@@ -728,30 +808,70 @@ void menuESP32Control() {
   espOnline = false;
   int tempC = -100;
   unsigned long lastTempPoll = 0;
-  String inBuf = "";
+  // Fixed buffer, not a String -- appending one byte at a time to a String on the Mega's
+  // small, fragmentation-prone heap can silently stall (Arduino String just gives up on a
+  // failed allocation) partway through a line, corrupting it. Each protocol line here is
+  // short (a chunk header + <=32 hex chars), so this only needs to be modest.
+  static char inBuf[80];
+  int inLen = 0;
   bool redraw = true;
+
+  // Chunked stop-and-wait transfer state (PSTART/D/PEND handling below). xferBuf
+  // accumulates the hex payload across chunks; sized for images well beyond the current
+  // 16x16/8x32 web UI presets.
+  bool xferActive = false;
+  int xferW = 0, xferH = 0, xferTotalLen = 0, xferReceived = 0;
+  static char xferBuf[1200];
 
   ESP_SERIAL.println("STATE:OFFLINE"); // In case a previous session left the ESP32 thinking it's online.
 
   while (true) {
     if (checkEStop()) { if (espOnline) ESP_SERIAL.println("STATE:OFFLINE"); return; }
 
-    // Drain lines from the ESP32: periodic "IP:..." broadcasts, and (while online)
-    // a staged "P:w,h:hexdata" print command.
+    // Drain lines from the ESP32: periodic "IP:..." broadcasts, and (while online) a
+    // stop-and-wait chunked transfer -- PSTART:w,h,len announces one, then <=32 hex
+    // chars at a time as "D:<chunk>", each acked with "OK\n"/"ERR\n" before the sender's
+    // next chunk, so no single burst can ever exceed the hardware RX buffer regardless
+    // of how long the Mega is blocked elsewhere when a chunk lands.
     while (ESP_SERIAL.available()) {
       char c = ESP_SERIAL.read();
       if (c == '\n') {
-        String line = inBuf; line.trim(); inBuf = "";
+        inBuf[inLen] = '\0';
+        String line = String(inBuf); line.trim();
+        inLen = 0;
         if (line.startsWith("IP:")) {
           ip = line.substring(3);
           redraw = true;
-        } else if (espOnline && line.startsWith("P:")) {
-          int comma = line.indexOf(','); int colon = line.indexOf(':', comma);
-          int w = (comma > 0 && colon > 0) ? line.substring(2, comma).toInt() : 0;
-          int h = (comma > 0 && colon > 0) ? line.substring(comma + 1, colon).toInt() : 0;
-          if (comma > 0 && colon > 0 && w > 0 && h > 0) {
-            String hexData = line.substring(colon + 1);
-            runIncomingPrint(w, h, hexData);
+        } else if (espOnline && line.startsWith("PSTART:")) {
+          int c1 = line.indexOf(','); int c2 = line.indexOf(',', c1 + 1);
+          int pw = (c1 > 0 && c2 > 0) ? line.substring(7, c1).toInt() : 0;
+          int ph = (c1 > 0 && c2 > 0) ? line.substring(c1 + 1, c2).toInt() : 0;
+          int plen = (c1 > 0 && c2 > 0) ? line.substring(c2 + 1).toInt() : 0;
+          if (c1 > 0 && c2 > 0 && pw > 0 && ph > 0 && plen > 0 && plen < (int)sizeof(xferBuf) - 1) {
+            xferW = pw; xferH = ph; xferTotalLen = plen; xferReceived = 0;
+            xferActive = true;
+            ESP_SERIAL.println("READY");
+          } else {
+            xferActive = false;
+            ESP_SERIAL.println("ERR");
+          }
+        } else if (xferActive && line.startsWith("D:")) {
+          String chunk = line.substring(2);
+          int n = chunk.length();
+          if (xferReceived + n <= xferTotalLen && xferReceived + n < (int)sizeof(xferBuf)) {
+            for (int i = 0; i < n; i++) xferBuf[xferReceived + i] = chunk[i];
+            xferReceived += n;
+            ESP_SERIAL.println("OK");
+          } else {
+            xferActive = false; // Sender/receiver disagree on length -- abort, don't guess.
+            ESP_SERIAL.println("ERR");
+          }
+        } else if (xferActive && line == "PEND") {
+          xferActive = false;
+          if (xferReceived == xferTotalLen) {
+            xferBuf[xferReceived] = '\0';
+            String hexData = String(xferBuf);
+            runIncomingPrint(xferW, xferH, hexData);
             // Always report the definitive current state once runIncomingPrint returns --
             // it may have declined at the alert/vacuum screen (never reaching PRINTING at
             // all) or fully printed, and either way the ESP32 needs telling so a web UI
@@ -759,16 +879,21 @@ void menuESP32Control() {
             reportEspIdleState();
             if (eStopLatched) return; // Let loop() show the e-stop screen instead of "Waiting...".
           } else {
-            ESP_SERIAL.println("error");
+            ESP_SERIAL.println("ERR");
           }
           redraw = true;
         }
-      } else {
-        inBuf += c;
+      } else if (inLen < (int)sizeof(inBuf) - 1) {
+        inBuf[inLen++] = c;
       }
+      // else: line longer than the buffer -- drop the overflow byte rather than corrupt
+      // memory. Protocol lines here are always short; this would only trip on noise.
     }
 
-    if (millis() - lastTempPoll > 1000) {
+    // Skip this tick if a transmission is actively arriving -- queryNanoLEDTempC blocks
+    // for a bit, and every ms spent there is a ms an incoming "P:" line isn't being
+    // drained. Not a full fix (a line could start mid-poll), just avoids the easy case.
+    if (millis() - lastTempPoll > 1000 && !ESP_SERIAL.available()) {
       tempC = queryNanoLEDTempC();
       lastTempPoll = millis();
       redraw = true;

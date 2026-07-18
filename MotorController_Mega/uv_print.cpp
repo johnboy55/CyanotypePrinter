@@ -43,9 +43,15 @@ void sendBatchToPrinthead(uint32_t durations[4]) {
   uint8_t mask = 0;
   for (int i = 0; i < 4; i++) { if (durations[i] > 0) bitSet(mask, i); }
   if (mask == 0) return;
-  String cmd = "F:" + String(mask) + "," + String(durations[0]) + "," + 
-               String(durations[1]) + "," + String(durations[2]) + "," + String(durations[3]) + "\n";
-  PRINTHEAD_SERIAL.print(cmd);
+  // Fixed buffer + snprintf instead of chained String concatenation -- this is called
+  // once per firing pixel column (tens of thousands of times on a full print), and
+  // String concatenation's repeated heap alloc/free was fragmenting the Mega's 8KB SRAM
+  // over the course of long prints.
+  char buf[48];
+  snprintf(buf, sizeof(buf), "F:%u,%lu,%lu,%lu,%lu\n", mask,
+           (unsigned long)durations[0], (unsigned long)durations[1],
+           (unsigned long)durations[2], (unsigned long)durations[3]);
+  PRINTHEAD_SERIAL.print(buf);
 }
 
 void waitForPrinthead() {
@@ -66,6 +72,12 @@ void waitForPrinthead() {
       Serial.print(F("ms, last reply='")); Serial.print(lastResponse); Serial.println(F("'"));
       return;
     }
+    // Drain any stale bytes before asking again -- without this, a reply that missed the
+    // 10ms window below gets left sitting in the RX buffer, and the next iteration's
+    // single-line read picks up THAT stale reply instead of the one for the query it's
+    // about to send. Since there's no request/response ID, that stale "S:0" gets treated
+    // as if it answered the current query, ending the wait before the Nano is actually done.
+    while (PRINTHEAD_SERIAL.available()) PRINTHEAD_SERIAL.read();
     PRINTHEAD_SERIAL.print("S\n");
     unsigned long timeout = millis();
     while (!PRINTHEAD_SERIAL.available() && millis() - timeout < 10) {}

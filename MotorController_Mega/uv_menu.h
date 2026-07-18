@@ -18,6 +18,7 @@ void menuMotor();
 void menuHomeXY();
 void menuYCtrl();
 void menuCalib();
+void menuViewLUT();
 void menuOffset();
 void menuTest();
 void menuBrowser();

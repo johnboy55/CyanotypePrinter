@@ -543,16 +543,36 @@ void menuOffset() {
   }
 }
 
+// Shows the active exposure LUT -- which file it came from and all 16 values -- so
+// "is the right LUT actually loaded?" is a glance instead of a guess. loadCalibrationFile
+// records the source filename (loadedLUTName) whenever a /calibrations file loads.
+void menuViewLUT() {
+  oledHeader("Active LUT");
+  display.setCursor(0, 12); display.print(loadedLUTName);
+  // 16 values in a 4x4 grid, 2 decimals -- String(float,N) not %f (no printf_flt).
+  for (int i = 0; i < 16; i++) {
+    display.setCursor((i % 4) * 32, 22 + (i / 4) * 10);
+    display.print(String(LUT16[i], 2));
+  }
+  display.sendBuffer();
+  while (true) {
+    if (checkEStop()) return;
+    if (readButton(btnBack) || readButton(btnEnter)) return;
+    delay(10);
+  }
+}
+
 void menuCalib() {
   int sub = 0;
-  const int SUB_ITEMS = 4;
+  const int SUB_ITEMS = 5;
   while (true) {
     if (checkEStop()) return;
     oledHeader("Calibration");
-    display.setCursor(0, 16); display.print(sub == 0 ? "> " : "  "); display.print("Fire LED");
-    display.setCursor(0, 26); display.print(sub == 1 ? "> " : "  "); display.print("Load LUT");
-    display.setCursor(0, 36); display.print(sub == 2 ? "> " : "  "); display.print("Print Pattern");
-    display.setCursor(0, 46); display.print(sub == 3 ? "> " : "  "); display.print("Offset");
+    display.setCursor(0, 14); display.print(sub == 0 ? "> " : "  "); display.print("Fire LED");
+    display.setCursor(0, 24); display.print(sub == 1 ? "> " : "  "); display.print("Load LUT");
+    display.setCursor(0, 34); display.print(sub == 2 ? "> " : "  "); display.print("Print Pattern");
+    display.setCursor(0, 44); display.print(sub == 3 ? "> " : "  "); display.print("Offset");
+    display.setCursor(0, 54); display.print(sub == 4 ? "> " : "  "); display.print("View LUT");
     display.sendBuffer();
 
     if (readButton(btnPlus))  sub = (sub + 1) % SUB_ITEMS;
@@ -561,6 +581,7 @@ void menuCalib() {
     if (readButton(btnEnter)) {
       if (sub == 2) { menuCalibPattern(); continue; }
       if (sub == 3) { menuOffset(); continue; }
+      if (sub == 4) { menuViewLUT(); continue; }
       if (sub == 0) {
         int step = 0;
         while (true) {
@@ -582,8 +603,15 @@ void menuCalib() {
           oledHeader("Load LUT");
           display.setCursor(0, 20); display.print(ok ? "Loaded:" : "Failed:");
           display.setCursor(0, 30); display.print(picked);
+          if (ok) {
+            // The endpoints answer the two booth questions at a glance: does level 0
+            // really mean "no exposure" (min should be 0.00), and how hot is full black?
+            display.setCursor(0, 42);
+            display.print("min " + String(LUT16[0], 2) + "s  max " + String(LUT16[15], 2) + "s");
+            display.setCursor(0, 54); display.print("Calib > View LUT for all");
+          }
           display.sendBuffer();
-          delay(900);
+          delay(ok ? 1800 : 900);
         }
       }
     }

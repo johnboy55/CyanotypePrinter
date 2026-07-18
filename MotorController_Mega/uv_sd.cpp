@@ -2,6 +2,8 @@
 
 const char CONFIG_FILE_PATH[] = "/config/uv.cfg";
 
+char loadedLUTName[24] = "(default)";
+
 static String trimBoth(const String &s) {
   int a = 0, b = (int)s.length();
   while (a < b && isspace((unsigned char)s[a])) ++a;
@@ -161,6 +163,12 @@ bool loadCalibrationFile(const String &path) {
     LUT16[n++] = tok.toFloat();
     if (comma < 0) break;
     start = comma + 1;
+  }
+  if (n == 16) {
+    // Record where the active LUT came from (basename only -- the OLED is 21 chars wide).
+    int slash = path.lastIndexOf('/');
+    String base = (slash >= 0) ? path.substring(slash + 1) : path;
+    base.toCharArray(loadedLUTName, sizeof(loadedLUTName));
   }
   return (n == 16);
 }

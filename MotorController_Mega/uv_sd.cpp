@@ -162,5 +162,13 @@ bool loadCalibrationFile(const String &path) {
     if (comma < 0) break;
     start = comma + 1;
   }
+  if (n == 16 && LUT16[0] > 0.0f) {
+    // Not an error -- a LUT may legitimately start above 0.0s where its measured visible
+    // range begins -- but level 0 is clamped to "never fire" by the print engine (see
+    // doPrintBMPSliceSerpentine), so make that visible in the log rather than silent.
+    // String(float) not %f: no printf_flt in this build, %f renders as '?'.
+    Serial.println("[LUT] Note: " + path + " LUT[0]=" + String(LUT16[0], 3) +
+                   "s; blank (level 0) pixels still never fire");
+  }
   return (n == 16);
 }

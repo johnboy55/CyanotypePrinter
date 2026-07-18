@@ -1010,6 +1010,12 @@ void doPrintBMPSliceSerpentine(Image4x &img, bool forward, bool byRow, bool appl
         if (t < img.width && img.valid[ ROW_FOR_LED[k] ]) {
           uint8_t v = img.row[ ROW_FOR_LED[k] ][t];
           if (CFG.invertImage && applyInvert) v = 255 - v;
+          // v==0 (post-invert) means "no exposure requested" -- never fire it, even when
+          // the loaded LUT's first entry is nonzero. Several calibration LUTs on the SD
+          // card (5sec/4_3/cal_049_to_243) start above 0.0s because their measured
+          // visible range does; without this guard those LUTs make every *blank* pixel
+          // fire too, fogging the background and roughly doubling print time.
+          if (v == 0) continue;
           const float dur_s = lutExposureFromByte(v) * expDiv;
           if (dur_s > 0.0f) { 
             durations[k] = (uint32_t)(dur_s * 1000000.0f);

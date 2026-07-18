@@ -840,8 +840,9 @@ static void drawImagePreview(int w, int h, const String &hexData, int boxX, int 
 
 // Runs once a validated "P:w,h:hexdata" arrives while online: alerts the attendant,
 // clears the gantry so paper can go on, seats it with vacuum once confirmed, prints,
-// and returns the carriage home in X and Y (Z is never touched automatically -- only
-// by manual operator adjustment). Returns to the idle online screen on cancel/e-stop too.
+// and parks the carriage clear of the bed so the print can be grabbed (Z is never
+// touched automatically -- only by manual operator adjustment). Returns to the idle
+// online screen on cancel/e-stop too.
 static void runIncomingPrint(int w, int h, const String &hexData) {
   buzzPrintIncoming();
   oledHeader("Print Incoming");
@@ -860,9 +861,10 @@ static void runIncomingPrint(int w, int h, const String &hexData) {
 
   // Clear the bed so the attendant can place paper -- vacuum stays off here since
   // suction fights positioning the sheet; +/- lets them pre-activate a fan if it helps
-  // hold an edge while placing it.
-  oledHeader("Load Paper"); display.setCursor(0, 20); display.print("Moving clear..."); display.sendBuffer();
-  yMoveMM(PAPER_LOAD_Y_MM, true);
+  // hold an edge while placing it. Absolute move (home + PAPER_LOAD_Y_MM), not relative:
+  // the carriage now parks at this same spot after the previous print, and a relative
+  // +80 from there would drive it to 160 -- or worse from any other starting position.
+  moveClearOfBed();
 
   bool fan1On = false, fan2On = false;
   bool redraw = true;
@@ -915,8 +917,10 @@ static void runIncomingPrint(int w, int h, const String &hexData) {
   cancelRequested = false;
   if (completedOk) buzzPrintSuccess();
 
-  // X and Y always return home after a print; Z is never moved automatically.
-  homeXY();
+  // Park clear of the bed (X home, Y at the paper-load line) instead of homing, so the
+  // gantry isn't sitting on top of the fresh print and it can be grabbed straight off
+  // the bed; Z is never moved automatically.
+  moveClearOfBed();
 }
 
 void menuESP32Control() {

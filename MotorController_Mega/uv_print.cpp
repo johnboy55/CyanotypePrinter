@@ -489,6 +489,16 @@ void moveToOffset() {
   moveToXYSteps(targetX, targetY, "Positioning", "Moving to print pos");
 }
 
+// Parks the carriage clear of the bed: X at true home, Y at the paper-load line
+// (PAPER_LOAD_Y_MM from true home, absolute -- NOT relative to wherever the carriage
+// happens to sit). Used both after a print finishes (so the gantry isn't parked on top
+// of the fresh print and it can be grabbed straight off the bed) and by the paper-load
+// step (so a new sheet can be placed). Same physical spot for both, which means the
+// post-print park position doubles as the next job's load position with zero extra travel.
+void moveClearOfBed() {
+  moveToXYSteps(0, lround_double(PAPER_LOAD_Y_MM * STEPS_PER_MM_Y), "Clearing Bed", "Moving clear of print");
+}
+
 void xMoveMM(float mm, bool right) { 
   long s = lround_double(mm * STEPS_PER_MM_X); 
   int oldPeriod = STEP_PERIOD_US;
@@ -937,9 +947,10 @@ void printEntireBMP_4by(const String &path) {
   ESP_SERIAL.println("STATE:PRINTING");
   printFromRowSource(src, path, false);
   printOriginStepsX = 0;
-  // Unlike the ESP32-triggered path (runIncomingPrint), nothing else returns this one
-  // home -- without this, an SD-card print left the carriage wherever the print ended.
-  if (!eStopLatched) homeXY();
+  // Unlike the ESP32-triggered path (runIncomingPrint), nothing else moves this one
+  // after it finishes -- without this, an SD-card print left the carriage wherever the
+  // print ended. Park clear of the bed (not home) so the print can be grabbed.
+  if (!eStopLatched) moveClearOfBed();
   reportEspIdleState();
 }
 

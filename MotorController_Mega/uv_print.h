@@ -45,6 +45,7 @@ void moveYToSteps(long target);
 void moveToXYSteps(long targetX, long targetY, const char* title, const char* subtitle);
 void homeXY();
 void moveToOffset();
+void moveClearOfBed();
 void xMoveMM(float mm, bool right);
 void zMoveMM(float mm, bool down);
 

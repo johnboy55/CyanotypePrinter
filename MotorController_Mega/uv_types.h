@@ -37,6 +37,10 @@ struct Config {
   float ledScale[4] = {1.0f, 1.0f, 1.0f, 1.0f}; // Added missing array
   int stepPeriodUs = 1000;                      // Added missing var
   int stepPulseUs = 5;                          // Added missing var
+  // Where the printhead moves to before a print starts (instead of true X=0/Y=0), so the
+  // print can be centered on paper that isn't aligned to the machine's absolute origin.
+  float offsetXmm = 0.0f;
+  float offsetYmm = 0.0f;
 };
 
 extern Config CFG; // Declared as extern to prevent duplicate definitions

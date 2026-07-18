@@ -50,6 +50,16 @@ void drawStatusRow(const bool ledOn[4], const String &rightText) {
   display.setCursor(rx, y); display.print(rightText); display.sendBuffer();
 }
 
+// Human-readable software-tracked carriage position, e.g. "X:12.3 Y:45.6". Deliberately
+// built with String(float,1) rather than snprintf/displayPrintf's %f: this build isn't
+// linked with -lprintf_flt (no such flag in platformio.ini), so avr-libc's vsnprintf
+// silently renders %f as a literal '?' instead of a number rather than failing loudly.
+// Arduino's String class formats floats itself via dtostrf, independent of libc printf,
+// so it's the safe way to get a float onto the OLED here.
+String xyPositionString() {
+  return "X:" + String(currentSteps / STEPS_PER_MM_X, 1) + " Y:" + String(currentStepsY / STEPS_PER_MM_Y, 1);
+}
+
 // Walks folder once, invoking visit(name, matchIndex) for each entry matching extLower.
 // Kept to a single small stack frame (one File, one name buffer) rather than caching
 // every matching name in a stack-resident array -- with only ~1.2KB free for stack+heap
@@ -288,18 +298,32 @@ void menuZCalib() {
   }
 }
 
+// Runs the same homeXY() used automatically after a print, but from the Motor Control
+// menu on demand -- lets the operator diagnose homing behavior (does it reach 0,0? does
+// it stop short on one axis?) without having to run a whole print first.
+void menuHomeXY() {
+  homeXY();
+  if (eStopLatched) return; // loop() will show the e-stop screen instead of "Done".
+  cancelRequested = false;
+  oledHeader("Home X/Y");
+  display.setCursor(0, 20); display.print("Done");
+  display.setCursor(0, 32); display.print(xyPositionString() + " mm");
+  display.sendBuffer();
+  delay(1000);
+}
+
 void menuMotor() {
   int sel = 0;
-  const int ITEMS = 4;
+  const int ITEMS = 5;
 
   while (true) {
     if (checkEStop()) return;
     oledHeader("Motor Control");
-    display.setCursor(0, 16); display.print(sel==0?"> ":"  "); display.print("X Move");
-    display.setCursor(0, 26); display.print(sel==1?"> ":"  "); display.print("Y Move");
-    display.setCursor(0, 36); display.print(sel==2?"> ":"  "); display.print("Z Move");
-    display.setCursor(0, 46); display.print(sel==3?"> ":"  "); display.print("Z Home");
-    display.setCursor(0, 56); display.print("[+/-]Sel [Ent]Go [Back]x");
+    display.setCursor(0, 14); display.print(sel==0?"> ":"  "); display.print("X Move");
+    display.setCursor(0, 24); display.print(sel==1?"> ":"  "); display.print("Y Move");
+    display.setCursor(0, 34); display.print(sel==2?"> ":"  "); display.print("Z Move");
+    display.setCursor(0, 44); display.print(sel==3?"> ":"  "); display.print("Z Home");
+    display.setCursor(0, 54); display.print(sel==4?"> ":"  "); display.print("Home X/Y");
     display.sendBuffer();
 
     if (readButton(btnPlus))  sel = (sel + 1) % ITEMS;
@@ -309,6 +333,7 @@ void menuMotor() {
       else if (sel == 1) menuYCtrl();
       else if (sel == 2) menuZCtrl();
       else if (sel == 3) menuZCalib();
+      else if (sel == 4) menuHomeXY();
     }
     if (readButton(btnBack)) return;
     delay(10);
@@ -483,16 +508,51 @@ void menuCalibPattern() {
   }
 }
 
+// Lets the operator capture the carriage's *current* position (jogged there beforehand
+// via Motor Control > X/Y Move) as the print-start offset, so a print can be centered on
+// paper that isn't aligned to the machine's absolute origin. Persisted immediately so it
+// survives a power cycle -- see moveToOffset() for where it's used.
+void menuOffset() {
+  int sub = 0;
+  const int SUB_ITEMS = 2;
+  while (true) {
+    if (checkEStop()) return;
+    oledHeader("Offset");
+    display.setCursor(0, 12); display.print("Cur: " + xyPositionString());
+    display.setCursor(0, 22);
+    display.print("Set: X:" + String(CFG.offsetXmm, 1) + " Y:" + String(CFG.offsetYmm, 1));
+    display.setCursor(0, 38); display.print(sub == 0 ? "> " : "  "); display.print("Set X here");
+    display.setCursor(0, 48); display.print(sub == 1 ? "> " : "  "); display.print("Set Y here");
+    display.sendBuffer();
+
+    if (readButton(btnPlus))  sub = (sub + 1) % SUB_ITEMS;
+    if (readButton(btnMinus)) sub = (sub - 1 + SUB_ITEMS) % SUB_ITEMS;
+    if (readButton(btnBack))  return;
+    if (readButton(btnEnter)) {
+      if (sub == 0) CFG.offsetXmm = currentSteps  / STEPS_PER_MM_X;
+      else          CFG.offsetYmm = currentStepsY / STEPS_PER_MM_Y;
+      bool ok = saveConfigToSD(CONFIG_FILE_PATH);
+      oledHeader("Offset");
+      display.setCursor(0, 20);
+      display.print(String(sub == 0 ? "X" : "Y") + " set: " + String(sub == 0 ? CFG.offsetXmm : CFG.offsetYmm, 1) + "mm");
+      display.setCursor(0, 32); display.print(ok ? "Saved to SD" : "SD save FAILED");
+      display.sendBuffer();
+      delay(1000);
+    }
+    delay(10);
+  }
+}
+
 void menuCalib() {
   int sub = 0;
-  const int SUB_ITEMS = 3;
+  const int SUB_ITEMS = 4;
   while (true) {
     if (checkEStop()) return;
     oledHeader("Calibration");
-    display.setCursor(0, 20); display.print(sub == 0 ? "> " : "  "); display.print("Fire LED");
-    display.setCursor(0, 30); display.print(sub == 1 ? "> " : "  "); display.print("Load LUT");
-    display.setCursor(0, 40); display.print(sub == 2 ? "> " : "  "); display.print("Print Pattern");
-    display.setCursor(0, 56); display.print("[+/-]Sel [Ent]Go [Back]x");
+    display.setCursor(0, 16); display.print(sub == 0 ? "> " : "  "); display.print("Fire LED");
+    display.setCursor(0, 26); display.print(sub == 1 ? "> " : "  "); display.print("Load LUT");
+    display.setCursor(0, 36); display.print(sub == 2 ? "> " : "  "); display.print("Print Pattern");
+    display.setCursor(0, 46); display.print(sub == 3 ? "> " : "  "); display.print("Offset");
     display.sendBuffer();
 
     if (readButton(btnPlus))  sub = (sub + 1) % SUB_ITEMS;
@@ -500,6 +560,7 @@ void menuCalib() {
     if (readButton(btnBack))  return;
     if (readButton(btnEnter)) {
       if (sub == 2) { menuCalibPattern(); continue; }
+      if (sub == 3) { menuOffset(); continue; }
       if (sub == 0) {
         int step = 0;
         while (true) {
@@ -578,15 +639,41 @@ void testFireLEDs() {
   }
 }
 
+// Jogs to the configured print-start offset, fires all 4 LEDs for 1s (so the operator can
+// see on paper exactly where a print will start/center), then returns to wherever the
+// carriage was beforehand rather than leaving it stranded at the offset.
+void testOffset() {
+  long savedX = currentSteps, savedY = currentStepsY;
+
+  moveToOffset();
+  if (eStopLatched) return;
+
+  if (!cancelRequested) {
+    oledHeader("Test Offset");
+    display.setCursor(0, 20); display.print("Firing 1s..."); display.sendBuffer();
+    uint32_t dur[4] = {1000000, 1000000, 1000000, 1000000};
+    sendBatchToPrinthead(dur);
+    waitForPrinthead();
+  }
+  cancelRequested = false;
+
+  moveToXYSteps(savedX, savedY, "Test Offset", "Returning...");
+  if (eStopLatched) return;
+  oledHeader("Test Offset");
+  display.setCursor(0, 20); display.print("Done");
+  display.sendBuffer();
+  delay(800);
+}
+
 void menuTest() {
   int sel = 0;
-  const int ITEMS = 2;
+  const int ITEMS = 3;
   while (true) {
     if (checkEStop()) return;
     oledHeader("Test Menu");
-    display.setCursor(0, 20); display.print(sel==0?"> ":"  "); display.print("Fire LEDs");
-    display.setCursor(0, 32); display.print(sel==1?"> ":"  "); display.print("Serial Relay");
-    display.setCursor(0, 54); display.print("[Back] to exit");
+    display.setCursor(0, 16); display.print(sel==0?"> ":"  "); display.print("Fire LEDs");
+    display.setCursor(0, 26); display.print(sel==1?"> ":"  "); display.print("Serial Relay");
+    display.setCursor(0, 36); display.print(sel==2?"> ":"  "); display.print("Test Offset");
     display.sendBuffer();
 
     if (readButton(btnPlus))  sel = (sel + 1) % ITEMS;
@@ -594,6 +681,7 @@ void menuTest() {
     if (readButton(btnEnter)) {
       if (sel == 0) testFireLEDs();
       if (sel == 1) testSerialRelay();
+      if (sel == 2) testOffset();
     }
     if (readButton(btnBack)) return;
     delay(10);
@@ -604,9 +692,10 @@ void menuBrowser() { menuFileBrowser(); }
 
 void menuPrint() { String picked; if (!listFilesToOLED("/prints", ".bmp", picked)) return; printEntireBMP_4by(picked); cancelRequested = false; }
 
-void zeroXHere() {
+void zeroHere() {
   currentSteps = 0;
-  Serial.println(F("[UTIL] X zero set here (currentSteps=0)"));
+  currentStepsY = 0;
+  Serial.println(F("[UTIL] X and Y zeros set here (currentSteps=0)"));
   oledHeader("Utilities");
   display.setCursor(0, 24); display.print("Set X=0 at");
   display.setCursor(0, 36); display.print("current position");
@@ -674,7 +763,7 @@ void menuUtilities() {
     if (readButton(btnPlus))  sel = (sel + 1) % ITEMS;
     if (readButton(btnMinus)) sel = (sel - 1 + ITEMS) % ITEMS;
     if (readButton(btnEnter)) {
-      if (sel == 0) { zeroXHere(); return; }
+      if (sel == 0) { zeroHere(); return; }
       if (sel == 1) { bool ok = loadConfigFromSD(CONFIG_FILE_PATH); if (ok) applyConfig(); oledHeader("Reload Config"); display.setCursor(0, 28); display.print(ok ? "Reloaded" : "Failed"); display.sendBuffer(); delay(900); return; }
       if (sel == 2) { measureMatrix(); return; }
       if (sel == 3) { loadMatrixFile(); return; }
@@ -778,15 +867,17 @@ static void runIncomingPrint(int w, int h, const String &hexData) {
   }
 
   // Paper's placed and confirmed: bring the vacuum up fully (the print itself needs full
-  // suction regardless of whatever was toggled while positioning the sheet) and return
-  // the carriage home before printing.
+  // suction regardless of whatever was toggled while positioning the sheet) and move to
+  // the configured print-start offset (Calib > Offset) instead of true home, so the print
+  // lands centered on paper that isn't aligned to the machine's absolute origin.
   setVacRelay(PIN_VAC_RELAY_1, true);
   setVacRelay(PIN_VAC_RELAY_2, true);
-  oledHeader("Homing"); display.setCursor(0, 20); display.print("Returning to origin"); display.sendBuffer();
-  moveYToZero();
+  moveToOffset();
+  printOriginStepsX = lround_double(CFG.offsetXmm * STEPS_PER_MM_X);
 
   // The attendant already confirmed above, so skip the print engine's own start prompt.
   printHexData_4by(w, h, hexData, true);
+  printOriginStepsX = 0;
 
   setVacRelay(PIN_VAC_RELAY_1, false);
   setVacRelay(PIN_VAC_RELAY_2, false);
@@ -797,17 +888,12 @@ static void runIncomingPrint(int w, int h, const String &hexData) {
   if (completedOk) buzzPrintSuccess();
 
   // X and Y always return home after a print; Z is never moved automatically.
-  oledHeader("Homing"); display.setCursor(0, 20); display.print("Returning to origin"); display.sendBuffer();
-  moveToSteps(0);
-  moveYToZero();
-  cancelRequested = false;
+  homeXY();
 }
 
 void menuESP32Control() {
   String ip = "waiting...";
   espOnline = false;
-  int tempC = -100;
-  unsigned long lastTempPoll = 0;
   // Fixed buffer, not a String -- appending one byte at a time to a String on the Mega's
   // small, fragmentation-prone heap can silently stall (Arduino String just gives up on a
   // failed allocation) partway through a line, corrupting it. Each protocol line here is
@@ -890,20 +976,13 @@ void menuESP32Control() {
       // memory. Protocol lines here are always short; this would only trip on noise.
     }
 
-    // Skip this tick if a transmission is actively arriving -- queryNanoLEDTempC blocks
-    // for a bit, and every ms spent there is a ms an incoming "P:" line isn't being
-    // drained. Not a full fix (a line could start mid-poll), just avoids the easy case.
-    if (millis() - lastTempPoll > 1000 && !ESP_SERIAL.available()) {
-      tempC = queryNanoLEDTempC();
-      lastTempPoll = millis();
-      redraw = true;
-    }
-
     if (redraw) {
       oledHeader(espOnline ? "ESP32: ONLINE" : "ESP32: OFFLINE");
       display.setCursor(0, 12); display.print("IP: "); display.print(ip);
-      display.setCursor(0, 24);
-      if (tempC > -100) displayPrintf(display, "LED Temp: %dC", tempC); else display.print("LED Temp: --");
+      // Software-tracked position -- see the Main Menu's copy of this readout for why it
+      // can drift from the true physical position; shown here too since this is the
+      // screen the attendant watches for long stretches while "Waiting for print...".
+      display.setCursor(0, 24); display.print(xyPositionString());
       display.setCursor(0, 40); display.print(espOnline ? "Waiting for print..." : "[Enter] Go Online");
       display.setCursor(0, 52); display.print(espOnline ? "[Back] Go Offline" : "[Back] Exit");
       display.sendBuffer();
@@ -985,13 +1064,17 @@ void menuMain() {
 
   oledHeader("Main Menu");
   display.setCursor(70, 0); display.print(nanoStatus);
-  display.setCursor(0, 14); display.print(mainSel==0?"> ":"  "); display.print("Calib");
-  display.setCursor(0, 26); display.print(mainSel==1?"> ":"  "); display.print("Print");
-  display.setCursor(0, 38); display.print(mainSel==2?"> ":"  "); display.print("Test");
-  display.setCursor(0, 50); display.print(mainSel==3?"> ":"  "); display.print("Motor");
-  display.setCursor(58, 14); display.print(mainSel==4?"> ":"  "); display.print("Browser");
-  display.setCursor(58, 26); display.print(mainSel==5?"> ":"  "); display.print("Utils");
-  display.setCursor(58, 38); display.print(mainSel==6?"> ":"  "); display.print("ESP32");
+  display.setCursor(0, 13); display.print(mainSel==0?"> ":"  "); display.print("Calib");
+  display.setCursor(0, 24); display.print(mainSel==1?"> ":"  "); display.print("Print");
+  display.setCursor(0, 35); display.print(mainSel==2?"> ":"  "); display.print("Test");
+  display.setCursor(0, 46); display.print(mainSel==3?"> ":"  "); display.print("Motor");
+  display.setCursor(58, 13); display.print(mainSel==4?"> ":"  "); display.print("Browser");
+  display.setCursor(58, 24); display.print(mainSel==5?"> ":"  "); display.print("Utils");
+  display.setCursor(58, 35); display.print(mainSel==6?"> ":"  "); display.print("ESP32");
+  // Software-tracked carriage position -- there's no hardware home switch on X/Y (only
+  // Z has one), so this is only as accurate as the last completed home/move; it's here
+  // specifically to help spot when it's drifted from where the carriage physically is.
+  display.setCursor(0, 54); display.print(xyPositionString());
   display.sendBuffer();
 
   if (readButton(btnPlus))  mainSel = (mainSel + 1) % 7;

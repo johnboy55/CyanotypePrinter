@@ -42,6 +42,10 @@ bool loadConfigFromSD(const char* path) {
   File f = SD.open(path, FILE_READ);
   if (!f) return false;
   String line, low;
+  // Tracks which keys this file actually contained, so keys added to the format after a
+  // given SD card's config was first written (like the offsets below) get backfilled into
+  // the file rather than silently defaulting every boot with no record of it on disk.
+  bool sawOffsetX = false, sawOffsetY = false;
   while (f.available()) {
     line = f.readStringUntil('\n'); line.replace("\r", "");
     line = trimBoth(line);
@@ -55,6 +59,8 @@ bool loadConfigFromSD(const char* path) {
     if (low.startsWith("led_spacing_mm=")) { parseFloatKey(low, "led_spacing_mm", CFG.ledSpacingMM); continue; }
     if (low.startsWith("step_period_us=")){ parseIntKey  (low, "step_period_us", CFG.stepPeriodUs); continue; }
     if (low.startsWith("step_pulse_us="))  { parseIntKey  (low, "step_pulse_us",  CFG.stepPulseUs ); continue; }
+    if (low.startsWith("offset_x_mm="))    { parseFloatKey(low, "offset_x_mm", CFG.offsetXmm); sawOffsetX = true; continue; }
+    if (low.startsWith("offset_y_mm="))    { parseFloatKey(low, "offset_y_mm", CFG.offsetYmm); sawOffsetY = true; continue; }
 
     if (low.startsWith("led_scales="))     { parseFloatCSV4(low, "led_scales", CFG.ledScale); continue; }
     if (low.startsWith("led1_scale="))     { parseFloatKey (low, "led1_scale", CFG.ledScale[0]); continue; }
@@ -68,6 +74,10 @@ bool loadConfigFromSD(const char* path) {
     }
   }
   f.close();
+
+  if (!sawOffsetX || !sawOffsetY) saveConfigToSD(path); // Backfill: write the full config
+  // (offsets included, at whatever default/loaded value they now hold) so this file has
+  // them explicitly from here on.
   return true;
 }
 
@@ -97,6 +107,8 @@ void writeDefaultConfigIfMissing(const char* path) {
   f.println("step_pulse_us=5");
   f.println("led_scales=1.000,1.000,1.000,1.000");
   f.println("invert_image=1");
+  f.println("offset_x_mm=0.0");
+  f.println("offset_y_mm=0.0");
   f.close();
 }
 
@@ -107,6 +119,11 @@ bool saveConfigToSD(const char* path) {
   CFG.stepPulseUs    = STEP_PULSE_US;
   for (int i = 0; i < 4; i++) CFG.ledScale[i] = LED_SCALE[i];
 
+  // FILE_WRITE opens for append, not overwrite -- without removing the old file first,
+  // every save would pile another full copy of these keys onto the end rather than
+  // replacing the previous values (which the "last one wins" parsing above would then
+  // read back correctly, but the file would grow forever and get harder to hand-edit).
+  if (SD.exists(path)) SD.remove(path);
   File f = SD.open(path, FILE_WRITE);
   if (!f) return false;
 
@@ -116,6 +133,8 @@ bool saveConfigToSD(const char* path) {
   f.print  ("led_spacing_mm=");f.println(String(CFG.ledSpacingMM, 3));
   f.print  ("step_period_us=");f.println(CFG.stepPeriodUs);
   f.print  ("step_pulse_us="); f.println(CFG.stepPulseUs);
+  f.print  ("offset_x_mm=");   f.println(String(CFG.offsetXmm, 3));
+  f.print  ("offset_y_mm=");   f.println(String(CFG.offsetYmm, 3));
   f.print("led_scales=");
   f.print(String(LED_SCALE[0],3)); f.print(",");
   f.print(String(LED_SCALE[1],3)); f.print(",");

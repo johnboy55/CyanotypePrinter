@@ -52,9 +52,12 @@ int STEP_PULSE_US = 5;
 int STEP_PERIOD_US = 1000;
 const float PAPER_LOAD_Y_MM = 80.0f;
 
-long currentSteps = 0; 
+long currentSteps = 0;
 long currentStepsY = 0;
-long currentStepsZ = 0; 
+long currentStepsZ = 0;
+long printOriginStepsX = 0;
+
+
 
 const int MESH_SIZE = 3; 
 float z_mesh[3][3];

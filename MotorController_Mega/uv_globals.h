@@ -4,14 +4,14 @@
 // Must be defined before Arduino.h/HardwareSerial.h are first pulled in (this header is
 // that first touchpoint for every .cpp in the sketch). Default AVR RX buffer is only 64
 // bytes with no flow control, giving a little headroom against a blocking wait elsewhere
-// (e.g. queryNanoLEDTempC's poll of the Nano) stalling ESP_SERIAL reads.
+// (e.g. queryNanoLimitMask's poll of the Nano) stalling ESP_SERIAL reads.
 // IMPORTANT: keep this <=256. Past 256, HardwareSerial.h widens its ring-buffer index
 // from uint8_t to uint16_t -- but only on AVR cores new enough to have that adaptive
 // typedef. On an older core, a >256 buffer with 8-bit indices wraps at 256 while the
 // array is actually larger, desyncing the ring buffer and losing *more* data than the
 // default, not less. This is real headroom (2x default) without touching that boundary;
 // the actual fix for large payloads is not blocking ESP_SERIAL reads for so long (see
-// queryNanoLEDTempC's timeout), not a bigger buffer.
+// queryNanoLimitMask's timeout), not a bigger buffer.
 #define SERIAL_RX_BUFFER_SIZE 128
 
 #include <Arduino.h>
@@ -80,6 +80,12 @@ extern int STEP_PULSE_US, STEP_PERIOD_US;
 extern const float PAPER_LOAD_Y_MM;
 
 extern long currentSteps, currentStepsY, currentStepsZ;
+// Raw-step X origin the print engine (doPrintBMPSliceSerpentine) sweeps from/to for each
+// row, instead of hardcoded absolute 0. Set to the print-start offset just before a print
+// begins and reset to 0 once it's done, so the offset holds for every row of the print,
+// not just the first (X gets re-driven to an absolute target every row; Y never does, so
+// it doesn't need this -- physically moving Y to the offset before printing is enough).
+extern long printOriginStepsX;
 extern const int MESH_SIZE; 
 extern float z_mesh[3][3];
 extern bool mesh_active;

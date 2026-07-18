@@ -119,28 +119,6 @@ int queryNanoLimitMask() {
   return -1; // Nano not responding -- never assume this means "safe".
 }
 
-// T[0] from the Nano's "T:t0,t1,t2,t3,t4,t5" reply is the printhead LED temperature (C).
-int queryNanoLEDTempC() {
-  PRINTHEAD_SERIAL.print("T\n");
-  unsigned long timeout = millis();
-  // Polled once a second from the ESP32-mode idle loop, which also needs to promptly
-  // drain ESP_SERIAL for an incoming "P:w,h:hexdata" print -- every ms spent blocked here
-  // is a ms that command can silently overflow the (small, unbuffered-by-flow-control)
-  // hardware RX buffer. The Nano's loop() answers "T" immediately with no blocking work
-  // of its own, so round-trip is normally low single-digit ms; 20ms is generous slack for
-  // that, not an attempt to tolerate a genuinely hung Nano.
-  while (!PRINTHEAD_SERIAL.available() && millis() - timeout < 20) {}
-  if (PRINTHEAD_SERIAL.available()) {
-    String resp = PRINTHEAD_SERIAL.readStringUntil('\n'); resp.trim();
-    if (resp.startsWith("T:")) {
-      String rest = resp.substring(2);
-      int comma = rest.indexOf(',');
-      return (comma > 0 ? rest.substring(0, comma) : rest).toInt();
-    }
-  }
-  return -100; // Nano not responding -- caller should render this as "--" rather than a real reading.
-}
-
 // Tells the ESP32 the printer's idle state (never call this while actually PRINTING --
 // that's sent separately). Reports OFFLINE even if espOnline is still true whenever an
 // e-stop is latched, since the machine can't accept a new job until it's cleared.
@@ -353,6 +331,13 @@ inline void yPulseLeft()  { digitalWrite(PIN_YL_STEP, HIGH); delayMicroseconds(S
 inline void yPulseRight() { digitalWrite(PIN_YR_STEP, HIGH); delayMicroseconds(STEP_PULSE_US); digitalWrite(PIN_YR_STEP, LOW); }
 
 void stepN(long n, bool dir) {
+  // yStepPair (below) self-enables the driver the same way; stepN never did, so any X
+  // move issued while something upstream last left PIN_EN disabled (e.g. doPrintBMPSlice-
+  // Serpentine's own cleanup, which sets it HIGH when a print finishes) pulsed PIN_STEP
+  // and advanced currentSteps in software with the driver never actually energized -- the
+  // motor didn't turn, but the tracked position still claimed it had. This was the real
+  // cause of X silently "reaching 0" after a print without physically moving.
+  digitalWrite(PIN_EN, LOW);
   digitalWrite(PIN_DIR, dir ? HIGH : LOW);
   float currentY_mm = currentStepsY / STEPS_PER_MM_Y;
   float targetX_mm = (currentSteps + (dir ? n : -n)) / STEPS_PER_MM_X;
@@ -435,14 +420,61 @@ void yMoveSkewMM(float baseMM, float deltaRightMM, bool forward) {
   STEP_PERIOD_US = oldPeriod;
 }
 
-// Y-axis counterpart to moveToSteps(0) for X: returns the carriage to Y=0 from wherever
-// currentStepsY currently tracks. yStepPair's dir=true increases currentStepsY, so we
-// move backward (dir=false) from a positive count and forward from a negative one.
-void moveYToZero() {
-  if (currentStepsY == 0) return;
-  bool forward = (currentStepsY < 0);
-  float mm = abs((float)currentStepsY / STEPS_PER_MM_Y);
-  yMoveMM(mm, forward);
+// Y-axis counterpart to moveToSteps() for X: moves to an absolute Y step target from
+// wherever currentStepsY currently tracks.
+void moveYToSteps(long target) {
+  long d = target - currentStepsY;
+  if (d) {
+    int oldPeriod = STEP_PERIOD_US;
+    STEP_PERIOD_US = max(STEP_PULSE_US + 10, oldPeriod / 4);
+    yStepPair(labs(d), labs(d), d > 0);
+    STEP_PERIOD_US = oldPeriod;
+  }
+}
+
+void moveYToZero() { moveYToSteps(0); }
+
+// Shared by homeXY() (target 0,0) and moveToOffset() (target CFG.offsetXmm/offsetYmm):
+// moves X then Y to an absolute step target. Two related bugs used to live in this
+// sequence, both stemming from checkCancel()/checkEStop() being read at the *top* of
+// stepN's/yStepPair's loop:
+//  1) If the X leg got cut short (Back button, or an unrelated e-stop like the printhead
+//     thermal cutoff), cancelRequested/eStopLatched was still set when the Y leg started,
+//     so Y's very first check aborted it before a single step ran -- only X moved.
+//  2) Callers like runIncomingPrint() run a ~1s success chime (buzzPrintSuccess(), pure
+//     tone()+delay(), no button polling) right before calling this. A Back press landing
+//     during that window sits queued on the button and gets picked up by *this* function's
+//     very first checkCancel() instead -- silently aborting the X leg before it moves at
+//     all, with nothing having actually asked to cancel homing itself.
+// Discarding any queued Back-button press and clearing cancelRequested immediately before
+// each leg closes both gaps (eStopLatched is left alone -- that's a real safety fault and
+// must still block whichever leg hasn't run yet).
+void moveToXYSteps(long targetX, long targetY, const char* title, const char* subtitle) {
+  oledHeader(title); display.setCursor(0, 20); display.print(subtitle); display.sendBuffer();
+  readButton(btnBack);
+  cancelRequested = false;
+  moveToSteps(targetX);
+  if (!eStopLatched) {
+    readButton(btnBack);
+    cancelRequested = false;
+    moveYToSteps(targetY);
+  }
+  cancelRequested = false;
+}
+
+// Returns the carriage to true X=0, Y=0 (neither axis has a hardware home switch --
+// only Z does; this is purely the tracked step counts).
+void homeXY() {
+  moveToXYSteps(0, 0, "Homing", "Returning to origin");
+}
+
+// Moves to the configured print-start position (CFG.offsetXmm/offsetYmm from true home)
+// instead of true home -- lets the operator center a print on paper that isn't aligned
+// to the machine's absolute origin. See Calib > Offset (SetX/SetY) for setting these.
+void moveToOffset() {
+  long targetX = lround_double(CFG.offsetXmm * STEPS_PER_MM_X);
+  long targetY = lround_double(CFG.offsetYmm * STEPS_PER_MM_Y);
+  moveToXYSteps(targetX, targetY, "Positioning", "Moving to print pos");
 }
 
 void xMoveMM(float mm, bool right) { 
@@ -775,8 +807,9 @@ void printEntireBMP(const String &path) {
     doPrintBMPSliceSerpentine(img, forward, false, true);
     if (slice < totalSlices - 1) {
       bool none[4] = {false,false,false,false};
-      char buf[24];
-      snprintf(buf, sizeof(buf), "Y +%.2fmm", CFG.yBandAdvanceMM);
+      // String(float,N) rather than snprintf's %f: this build has no -lprintf_flt, so
+      // avr-libc's snprintf renders %f as a literal '?' instead of a number.
+      String buf = "Y +" + String(CFG.yBandAdvanceMM, 2) + "mm";
 
 /**
  * @brief Prints a BMP image using an interlaced/staggered approach, advancing one row at a time.
@@ -788,7 +821,7 @@ void printEntireBMP(const String &path) {
  * 
  * @param path The absolute path to the BMP file on the SD card.
  */
-      drawStatusRow(none, String(buf));
+      drawStatusRow(none, buf);
       yMoveMM(CFG.yBandAdvanceMM, true);
     }
   }
@@ -805,19 +838,6 @@ static void printFromRowSource(RowSource &src, const String &label, bool skipSta
   if (src.width <= 0 || src.height <= 0) {
     oledHeader("Print Error"); display.setCursor(0, 20);
     display.print("Bad image"); display.sendBuffer(); delay(2000);
-    return;
-  }
-
-  // Confirm the printhead (Nano) is actually answering before committing to a full print --
-  // otherwise a dead/disconnected link means every exposure silently does nothing (LEDs
-  // never fire, since sendBatchToPrinthead's commands just vanish into an unresponsive
-  // UART) and the operator only finds out after watching the whole thing run to "done".
-  if (queryNanoLEDTempC() <= -100) {
-    oledHeader("Print Error");
-    display.setCursor(0, 20); display.print("Printhead not responding");
-    display.setCursor(0, 32); display.print("Check Nano link/power");
-    display.sendBuffer(); delay(2500);
-    Serial.println(F("[PRINT] Aborting: printhead (Nano) unresponsive to T query"));
     return;
   }
 
@@ -858,16 +878,13 @@ static void printFromRowSource(RowSource &src, const String &label, bool skipSta
       return;
     }
 
-    // Row/temp are steady for the whole slice, so redraw them once here rather than
-    // on every column -- doPrintBMPSliceSerpentine only touches the footer LED/col row.
+    // Row is steady for the whole slice, so redraw it once here rather than on every
+    // column -- doPrintBMPSliceSerpentine only touches the footer LED/col row.
     const int rowShown = min(slice + 1, src.height);
-    const int tempC = queryNanoLEDTempC();
     ESP_SERIAL.print("PROGRESS:"); ESP_SERIAL.print(rowShown); ESP_SERIAL.print(",");
     ESP_SERIAL.print(src.height); ESP_SERIAL.print("\n");
     oledHeader("Printing");
     display.setCursor(0, 12); displayPrintf(display, "Row %d/%d", rowShown, src.height);
-    display.setCursor(70, 12);
-    if (tempC > -100) displayPrintf(display, "T:%dC", tempC); else display.print("T:--");
     display.setCursor(0, 24); display.print(label);
     display.sendBuffer();
 
@@ -876,9 +893,7 @@ static void printFromRowSource(RowSource &src, const String &label, bool skipSta
 
     if (slice < totalSlices - 1) {
       bool none[4] = {false,false,false,false};
-      char buf[24];
-      snprintf(buf, sizeof(buf), "Y +%.2fmm", CFG.mmPerPixel);
-      drawStatusRow(none, String(buf));
+      drawStatusRow(none, "Y +" + String(CFG.mmPerPixel, 2) + "mm");
       yMoveMM(CFG.mmPerPixel, true);
     }
   }
@@ -901,8 +916,18 @@ void printEntireBMP_4by(const String &path) {
     display.sendBuffer(); delay(2000);
     return;
   }
+  // Move to the configured print-start offset (Calib > Offset) instead of true home, so
+  // the print lands centered on paper that isn't aligned to the machine's absolute origin
+  // -- same as the ESP32-triggered path (runIncomingPrint), which this had no equivalent
+  // of before.
+  moveToOffset();
+  printOriginStepsX = lround_double(CFG.offsetXmm * STEPS_PER_MM_X);
   ESP_SERIAL.println("STATE:PRINTING");
   printFromRowSource(src, path, false);
+  printOriginStepsX = 0;
+  // Unlike the ESP32-triggered path (runIncomingPrint), nothing else returns this one
+  // home -- without this, an SD-card print left the carriage wherever the print ended.
+  if (!eStopLatched) homeXY();
   reportEspIdleState();
 }
 
@@ -940,8 +965,11 @@ void doPrintBMPSliceSerpentine(Image4x &img, bool forward, bool byRow, bool appl
   const float max_x_mm = (img.width - 1) * mm_per_pixel + 3.0f * led_spacing;
   const int total_steps = (int)(max_x_mm / step_mm) + 1;
 
-  if (forward) moveToSteps(0);
-  else         moveToSteps(lround_double(max_x_mm * STEPS_PER_MM_X));
+  // printOriginStepsX shifts the whole sweep by the print-start offset (see
+  // moveToOffset()) -- it's added here rather than relied on from wherever the carriage
+  // physically sits, because every row re-drives X to this same absolute target.
+  if (forward) moveToSteps(printOriginStepsX);
+  else         moveToSteps(printOriginStepsX + lround_double(max_x_mm * STEPS_PER_MM_X));
 
   int sStart = forward ? 0 : total_steps - 1;
   int sEnd   = forward ? total_steps - 1 : 0;
@@ -1085,9 +1113,7 @@ void printCalibrationPattern(float maxTimeSec) {
       }
 
       if (activeCount > 0) {
-        char buf[32];
-        snprintf(buf, sizeof(buf), "R%d X%.0fmm", row, x_carriage);
-        drawStatusRow(willFire, String(buf));
+        drawStatusRow(willFire, "R" + String(row) + " X" + String(x_carriage, 0) + "mm");
         sendBatchToPrinthead(durations);
         waitForPrinthead();
       }

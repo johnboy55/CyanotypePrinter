@@ -7,6 +7,7 @@ bool readButton(Btn &b);
 bool buttonHeld(const Btn &b);
 void oledHeader(const char* title);
 void drawStatusRow(const bool ledOn[4], const String &rightText);
+String xyPositionString();
 
 void renderEmergencyStopScreen();
 void menuMain();
@@ -14,8 +15,10 @@ void menuXCtrl();
 void menuZCtrl();
 void menuZCalib();
 void menuMotor();
+void menuHomeXY();
 void menuYCtrl();
 void menuCalib();
+void menuOffset();
 void menuTest();
 void menuBrowser();
 void menuPrint();
@@ -25,6 +28,7 @@ void menuESP32Control();
 // PROTOTYPES FOR MISSING FUNCTIONS
 bool listFilesToOLED(const char* dir, const char* ext, String &picked);
 void testFireLEDs();
+void testOffset();
 void testSerialRelay();
 void menuFileBrowser();
 void zeroXHere();

@@ -9,7 +9,6 @@ bool isZMaxSwitchPressed();
 
 // --- Emergency stop ---
 int queryNanoLimitMask();   // -1 = Nano not responding, else bit0=Z bit1=Y bit2=overtemp
-int queryNanoLEDTempC();    // -100 = Nano not responding, else printhead LED temp in C
 void reportEspIdleState();  // Tells the ESP32 STATE:ONLINE/OFFLINE per espOnline/eStopLatched
 bool checkEStop();          // Services the raw ISR flag; returns true if caller should abort its loop
 void clearEmergencyStop();  // Operator-initiated resume after inspecting the cause
@@ -39,6 +38,13 @@ void moveToPixel(long p);
 void yMoveMM(float mm, bool forward);
 void yMoveSkewMM(float baseMM, float deltaRightMM, bool forward);
 void moveYToZero();
+void moveYToSteps(long target);
+// Shared absolute X+Y mover used by homeXY(), moveToOffset(), and testOffset()'s return
+// trip -- see its definition for why the stale-button/e-stop handling around each leg
+// matters.
+void moveToXYSteps(long targetX, long targetY, const char* title, const char* subtitle);
+void homeXY();
+void moveToOffset();
 void xMoveMM(float mm, bool right);
 void zMoveMM(float mm, bool down);
 

@@ -1,0 +1,291 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Cyanotype LUT Calculator</title>
+<style>
+  :root {
+    --blue: #1d4e89;
+    --blue-dark: #123054;
+    --ink: #1c2733;
+    --paper: #f6f4ef;
+    --card: #ffffff;
+    --line: #d8d4cb;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; padding: 24px;
+    font-family: -apple-system, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+    background: var(--paper); color: var(--ink);
+    display: flex; justify-content: center;
+  }
+  main { width: 100%; max-width: 760px; }
+  h1 { margin: 0 0 4px; font-size: 1.5rem; color: var(--blue-dark); }
+  .sub { margin: 0 0 20px; color: #5a6470; font-size: 0.95rem; }
+  .card {
+    background: var(--card); border: 1px solid var(--line); border-radius: 10px;
+    padding: 18px; margin-bottom: 16px;
+  }
+  .controls { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 14px; }
+  label { display: block; font-size: 0.8rem; font-weight: 600; margin-bottom: 4px; color: var(--blue-dark); }
+  input[type=number], select {
+    width: 100%; padding: 7px 9px; font-size: 1rem;
+    border: 1px solid var(--line); border-radius: 6px; background: #fff; color: var(--ink);
+  }
+  input[type=range] { width: 100%; margin-top: 8px; accent-color: var(--blue); }
+  .hint { font-size: 0.78rem; color: #5a6470; margin-top: 4px; line-height: 1.35; }
+  .warn { color: #a33; font-size: 0.85rem; margin-top: 10px; min-height: 1.2em; }
+  canvas { width: 100%; height: auto; display: block; }
+  .swatches { display: flex; margin-top: 10px; border: 1px solid var(--line); border-radius: 6px; overflow: hidden; }
+  .swatches div { flex: 1; height: 34px; }
+  .swatch-label { font-size: 0.75rem; color: #5a6470; margin-top: 4px; }
+  .out {
+    font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    font-size: 0.85rem; background: #f0f3f7; border: 1px solid var(--line);
+    border-radius: 6px; padding: 10px; word-break: break-all; user-select: all;
+  }
+  .btnrow { display: flex; gap: 10px; margin-top: 12px; flex-wrap: wrap; }
+  button {
+    padding: 8px 16px; font-size: 0.9rem; font-weight: 600;
+    border: 1px solid var(--blue); border-radius: 6px; cursor: pointer;
+    background: var(--blue); color: #fff;
+  }
+  button.secondary { background: #fff; color: var(--blue); }
+  button:active { transform: translateY(1px); }
+  .summary { font-size: 0.85rem; color: #5a6470; margin-top: 8px; }
+  ol { font-size: 0.9rem; line-height: 1.55; padding-left: 20px; margin: 8px 0 0; }
+  code { background: #f0f3f7; padding: 1px 5px; border-radius: 4px; font-size: 0.85em; }
+</style>
+</head>
+<body>
+<main>
+  <h1>Cyanotype LUT Calculator</h1>
+  <p class="sub">Generates the 16-entry exposure lookup table the printer loads from
+  <code>/calibrations/*.txt</code> on the SD card. Entry&nbsp;0 is always 0 (paper white);
+  entries&nbsp;1&ndash;15 ramp from Min to Max exposure.</p>
+
+  <div class="card">
+    <div class="controls">
+      <div>
+        <label for="minMs">Min exposure (ms)</label>
+        <input type="number" id="minMs" value="50" min="1" step="5">
+        <div class="hint">Lightest printable tone. Raise if highlights don't show; lower if they're too dark.</div>
+      </div>
+      <div>
+        <label for="maxMs">Max exposure (ms)</label>
+        <input type="number" id="maxMs" value="750" min="10" step="10">
+        <div class="hint">Full-density exposure (Dmax). Also the worst-case per-pixel print time.</div>
+      </div>
+      <div>
+        <label for="gamma">Gamma: <span id="gammaVal">1.00</span></label>
+        <input type="number" id="gammaNum" value="1.00" min="0.20" max="4.00" step="0.05">
+        <input type="range" id="gamma" value="1.00" min="0.20" max="4.00" step="0.05">
+        <div class="hint">&gt;1 spreads the light tones apart (more highlight separation); &lt;1 favors the darks.</div>
+      </div>
+      <div>
+        <label for="spacing">Spacing</label>
+        <select id="spacing">
+          <option value="log" selected>Logarithmic (equal-ratio steps)</option>
+          <option value="linear">Linear (equal-ms steps)</option>
+        </select>
+        <div class="hint">Log matches cyanotype's response &mdash; each step is the same % more light. Start here.</div>
+      </div>
+    </div>
+    <div class="warn" id="warn"></div>
+  </div>
+
+  <div class="card">
+    <canvas id="chart" width="720" height="300"></canvas>
+    <div class="swatches" id="swatches"></div>
+    <div class="swatch-label">Relative dose per tone step (visual aid only &mdash; not calibrated print density)</div>
+  </div>
+
+  <div class="card">
+    <label>LUT file contents (seconds)</label>
+    <div class="out" id="output"></div>
+    <div class="summary" id="summary"></div>
+    <div class="btnrow">
+      <button id="copyBtn">Copy</button>
+      <button id="dlBtn" class="secondary">Download <span id="dlName">LUT750.TXT</span></button>
+      <button id="resetBtn" class="secondary">Reset defaults</button>
+    </div>
+  </div>
+
+  <div class="card">
+    <label>Loading it on the printer</label>
+    <ol>
+      <li>Save the file into the <code>/calibrations/</code> folder on the SD card (keep the 8.3-style filename).</li>
+      <li>On the printer: <b>Calib</b> menu &rarr; load calibration file &rarr; pick it.</li>
+      <li>Confirm with <b>Calib &rarr; View LUT</b> that the numbers took.</li>
+    </ol>
+  </div>
+</main>
+
+<script>
+(function () {
+  var $ = function (id) { return document.getElementById(id); };
+  var els = {
+    minMs: $('minMs'), maxMs: $('maxMs'),
+    gamma: $('gamma'), gammaNum: $('gammaNum'), gammaVal: $('gammaVal'),
+    spacing: $('spacing'), warn: $('warn'),
+    chart: $('chart'), swatches: $('swatches'),
+    output: $('output'), summary: $('summary'),
+    copyBtn: $('copyBtn'), dlBtn: $('dlBtn'), dlName: $('dlName'), resetBtn: $('resetBtn')
+  };
+
+  function computeLUT(minS, maxS, gamma, spacing) {
+    var lut = [0];
+    for (var i = 1; i <= 15; i++) {
+      var x = (i - 1) / 14;          // 0..1 across entries 1..15
+      var w = Math.pow(x, gamma);    // gamma-warped position along the ramp
+      var t = (spacing === 'log')
+        ? minS * Math.pow(maxS / minS, w)
+        : minS + (maxS - minS) * w;
+      lut.push(t);
+    }
+    return lut;
+  }
+
+  function validate(minMs, maxMs, gamma) {
+    if (!(minMs > 0)) return 'Min exposure must be greater than 0.';
+    if (!(maxMs > minMs)) return 'Max exposure must be greater than Min.';
+    if (!(gamma >= 0.2 && gamma <= 4)) return 'Gamma must be between 0.2 and 4.';
+    return '';
+  }
+
+  function fmt(v) { return v.toFixed(3); }
+
+  function drawChart(lut, maxS) {
+    var c = els.chart, ctx = c.getContext('2d');
+    var W = c.width, H = c.height;
+    var padL = 52, padR = 14, padT = 14, padB = 30;
+    var plotW = W - padL - padR, plotH = H - padT - padB;
+
+    ctx.clearRect(0, 0, W, H);
+
+    // gridlines + y labels (ms)
+    ctx.strokeStyle = '#e3e0d8'; ctx.fillStyle = '#5a6470';
+    ctx.font = '12px sans-serif'; ctx.textAlign = 'right'; ctx.textBaseline = 'middle';
+    var ySteps = 5;
+    for (var g = 0; g <= ySteps; g++) {
+      var y = padT + plotH - (g / ySteps) * plotH;
+      ctx.beginPath(); ctx.moveTo(padL, y); ctx.lineTo(W - padR, y); ctx.stroke();
+      ctx.fillText(Math.round((g / ySteps) * maxS * 1000) + 'ms', padL - 6, y);
+    }
+    // x labels (tone index)
+    ctx.textAlign = 'center'; ctx.textBaseline = 'top';
+    for (var i = 0; i <= 15; i++) {
+      var x = padL + (i / 15) * plotW;
+      if (i % 3 === 0) ctx.fillText(String(i), x, H - padB + 8);
+    }
+    ctx.fillText('tone index (0 = white, 15 = full blue)', padL + plotW / 2, H - padB + 8 + 0);
+
+    // curve
+    ctx.strokeStyle = '#1d4e89'; ctx.lineWidth = 2;
+    ctx.beginPath();
+    for (var j = 0; j <= 15; j++) {
+      var px = padL + (j / 15) * plotW;
+      var py = padT + plotH - (lut[j] / maxS) * plotH;
+      if (j === 0) ctx.moveTo(px, py); else ctx.lineTo(px, py);
+    }
+    ctx.stroke();
+    // points
+    ctx.fillStyle = '#1d4e89';
+    for (var k = 0; k <= 15; k++) {
+      var qx = padL + (k / 15) * plotW;
+      var qy = padT + plotH - (lut[k] / maxS) * plotH;
+      ctx.beginPath(); ctx.arc(qx, qy, 3.5, 0, Math.PI * 2); ctx.fill();
+    }
+  }
+
+  function drawSwatches(lut, maxS) {
+    els.swatches.innerHTML = '';
+    // White -> Prussian blue, scaled by relative dose. Purely illustrative.
+    for (var i = 0; i <= 15; i++) {
+      var f = lut[i] / maxS;
+      var r = Math.round(246 + (18 - 246) * f);
+      var g = Math.round(244 + (48 - 244) * f);
+      var b = Math.round(239 + (84 - 239) * f);
+      var d = document.createElement('div');
+      d.style.background = 'rgb(' + r + ',' + g + ',' + b + ')';
+      d.title = 'entry ' + i + ': ' + fmt(lut[i]) + 's';
+      els.swatches.appendChild(d);
+    }
+  }
+
+  function csvLine(lut) { return lut.map(fmt).join(','); }
+
+  function suggestedName(maxMs) {
+    return ('LUT' + Math.round(maxMs)).slice(0, 8) + '.TXT';
+  }
+
+  function update() {
+    var minMs = parseFloat(els.minMs.value);
+    var maxMs = parseFloat(els.maxMs.value);
+    var gamma = parseFloat(els.gammaNum.value);
+    els.gamma.value = gamma;
+    els.gammaVal.textContent = isNaN(gamma) ? '?' : gamma.toFixed(2);
+
+    var err = validate(minMs, maxMs, gamma);
+    els.warn.textContent = err;
+    if (err) return;
+
+    var lut = computeLUT(minMs / 1000, maxMs / 1000, gamma, els.spacing.value);
+    els.output.textContent = csvLine(lut);
+    els.dlName.textContent = suggestedName(maxMs);
+
+    var ratio = (els.spacing.value === 'log' && gamma === 1)
+      ? '  ·  step ratio ×' + Math.pow(maxMs / minMs, 1 / 14).toFixed(3)
+      : '';
+    els.summary.textContent = 'Range ' + Math.round(minMs) + 'ms → ' + Math.round(maxMs) +
+      'ms across 15 printable steps' + ratio + '. Worst-case per-pixel exposure: ' + Math.round(maxMs) + 'ms.';
+
+    drawChart(lut, maxMs / 1000);
+    drawSwatches(lut, maxMs / 1000);
+  }
+
+  els.copyBtn.addEventListener('click', function () {
+    var text = els.output.textContent;
+    function fallback() {
+      var range = document.createRange();
+      range.selectNodeContents(els.output);
+      var sel = window.getSelection();
+      sel.removeAllRanges(); sel.addRange(range);
+      document.execCommand('copy');
+    }
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+      navigator.clipboard.writeText(text).catch(fallback);
+    } else fallback();
+    els.copyBtn.textContent = 'Copied!';
+    setTimeout(function () { els.copyBtn.textContent = 'Copy'; }, 1200);
+  });
+
+  els.dlBtn.addEventListener('click', function () {
+    var blob = new Blob([els.output.textContent + '\n'], { type: 'text/plain' });
+    var a = document.createElement('a');
+    a.href = URL.createObjectURL(blob);
+    a.download = els.dlName.textContent;
+    document.body.appendChild(a); a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(a.href);
+  });
+
+  els.resetBtn.addEventListener('click', function () {
+    els.minMs.value = 50; els.maxMs.value = 750;
+    els.gammaNum.value = '1.00'; els.gamma.value = 1;
+    els.spacing.value = 'log';
+    update();
+  });
+
+  els.gamma.addEventListener('input', function () { els.gammaNum.value = parseFloat(els.gamma.value).toFixed(2); update(); });
+  ['minMs', 'maxMs', 'gammaNum', 'spacing'].forEach(function (id) {
+    els[id].addEventListener('input', update);
+    els[id].addEventListener('change', update);
+  });
+
+  update();
+})();
+</script>
+</body>
+</html>

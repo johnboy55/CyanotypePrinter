@@ -1021,7 +1021,14 @@ void doPrintBMPSliceSerpentine(Image4x &img, bool forward, bool byRow, bool appl
         if (t < img.width && img.valid[ ROW_FOR_LED[k] ]) {
           uint8_t v = img.row[ ROW_FOR_LED[k] ][t];
           if (CFG.invertImage && applyInvert) v = 255 - v;
-          const float dur_s = lutExposureFromByte(v) * expDiv;
+          // LED_SCALE compensates each LED's measured brightness difference (led_scales
+          // in uv.cfg). It was loaded/saved/applied into the global but never actually
+          // used in the exposure math, so the calibrated values silently did nothing --
+          // each LED prints every 4th row, so a ~25% brightness spread shows up as
+          // periodic row banding. Deliberately NOT applied in printCalibrationPattern:
+          // that pattern exists to measure the raw per-LED response these scales are
+          // derived from.
+          const float dur_s = lutExposureFromByte(v) * LED_SCALE[k] * expDiv;
           if (dur_s > 0.0f) { 
             durations[k] = (uint32_t)(dur_s * 1000000.0f);
             willFire[k] = true; 

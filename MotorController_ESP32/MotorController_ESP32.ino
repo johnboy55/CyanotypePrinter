@@ -489,7 +489,7 @@ void setup() {
   
   // Setup Wi-Fi Access Point
   Serial.println("\nStarting Wi-Fi Access Point...");
-  WiFi.softAP(ssid, password);
+  WiFi.softAP(ssid, password,6, false, 4);
   
   Serial.print("Connect to Wi-Fi: ");
   Serial.println(ssid);

@@ -939,7 +939,7 @@ void menuESP32Control() {
   // 16x16/8x32 web UI presets.
   bool xferActive = false;
   int xferW = 0, xferH = 0, xferTotalLen = 0, xferReceived = 0;
-  static char xferBuf[1200];
+  static char xferBuf[512];
 
   ESP_SERIAL.println("STATE:OFFLINE"); // In case a previous session left the ESP32 thinking it's online.
 

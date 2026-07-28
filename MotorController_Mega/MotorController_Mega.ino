@@ -120,6 +120,12 @@ void setup() {
   // (RX3 = pin 15, TX3 = pin 14) for inter-processor communication.
   ESP_SERIAL.begin(ESP_BAUD);
   PRINTHEAD_SERIAL.begin(PRINTHEAD_BAUD);
+  // Bound blocking reads on the printhead link. Every readStringUntil('\n') otherwise
+  // waits the Stream default (1000ms) whenever a newline is lost to noise/corruption --
+  // turning one bad byte into a visible one-second stall per status poll. A complete
+  // reply is ~5 bytes (<1ms at 115200), so 50ms is generous for a healthy link while
+  // keeping a corrupted exchange from dominating the per-pixel cadence.
+  PRINTHEAD_SERIAL.setTimeout(50);
   
   pinMode(PIN_STEP, OUTPUT); 
   pinMode(PIN_DIR, OUTPUT); 

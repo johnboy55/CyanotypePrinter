@@ -48,9 +48,27 @@ float MM_PER_PIXEL = 2.0f;
 int STEPS_PER_PIXEL = 0;              
 float LED_SPACING_MM = 7.0f;
 int OFFSET_PIXELS = 0;
-int STEP_PULSE_US = 5;                 
-int STEP_PERIOD_US = 1000;
+int STEP_PULSE_US = 5;
+const int Z_STEP_PERIOD_US = 1000;
 const float PAPER_LOAD_Y_MM = 80.0f;
+
+AccelStepper stepperX (AccelStepper::DRIVER, PIN_STEP,    PIN_DIR);
+AccelStepper stepperYL(AccelStepper::DRIVER, PIN_YL_STEP, PIN_Y_DIR);
+AccelStepper stepperYR(AccelStepper::DRIVER, PIN_YR_STEP, PIN_YR_DIR);
+
+void applyMotionConfig() {
+  stepperX.setMaxSpeed(CFG.maxSpeedXmm * STEPS_PER_MM_X);
+  stepperX.setAcceleration(CFG.accelXmm * STEPS_PER_MM_X);
+  stepperX.setMinPulseWidth(STEP_PULSE_US);
+
+  stepperYL.setMaxSpeed(CFG.maxSpeedYmm * STEPS_PER_MM_Y);
+  stepperYL.setAcceleration(CFG.accelYmm * STEPS_PER_MM_Y);
+  stepperYL.setMinPulseWidth(STEP_PULSE_US);
+
+  stepperYR.setMaxSpeed(CFG.maxSpeedYmm * STEPS_PER_MM_Y);
+  stepperYR.setAcceleration(CFG.accelYmm * STEPS_PER_MM_Y);
+  stepperYR.setMinPulseWidth(STEP_PULSE_US);
+}
 
 long currentSteps = 0;
 long currentStepsY = 0;
@@ -150,6 +168,8 @@ void setup() {
   STEPS_PER_MM_Y  = (MOTOR_STEPS_PER_REV * MICROSTEPS_Y) / LEAD_MM_Y;
   STEPS_PER_PIXEL = max(1, (int)(STEPS_PER_MM_X * MM_PER_PIXEL + 0.5f));
   OFFSET_PIXELS   = max(1, (int)(LED_SPACING_MM / MM_PER_PIXEL + 0.5f));
+  // Built-in defaults; applyConfig() re-applies this once SD config (if any) loads.
+  applyMotionConfig();
 
   Wire.begin();
   display.begin();
@@ -161,7 +181,7 @@ void setup() {
 
   SPI.begin();
   if (SD.begin(PIN_SD_CS)) {
-    Serial.println("Reading config");
+    Serial.println(F("Reading config"));
     writeDefaultConfigIfMissing(CONFIG_FILE_PATH);
     if (loadConfigFromSD(CONFIG_FILE_PATH)) applyConfig();
     else {

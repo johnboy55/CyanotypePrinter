@@ -3,9 +3,11 @@
 #include "uv_globals.h"
 
 void displayPrintf(OledDisplay &disp, const char *fmt, ...);
+void displayPrintf(OledDisplay &disp, const __FlashStringHelper *fmt, ...);
 bool readButton(Btn &b);
 bool buttonHeld(const Btn &b);
 void oledHeader(const char* title);
+void oledHeader(const __FlashStringHelper* title);
 void drawStatusRow(const bool ledOn[4], const String &rightText);
 String xyPositionString();
 
@@ -20,6 +22,7 @@ void menuYCtrl();
 void menuCalib();
 void menuViewLUT();
 void menuOffset();
+void menuMotionSpeed();
 void menuTest();
 void menuBrowser();
 void menuPrint();

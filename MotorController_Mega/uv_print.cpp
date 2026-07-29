@@ -62,7 +62,7 @@ void waitForPrinthead() {
   // freeze the operator can only escape by hitting Back.
   const unsigned long timeoutMs = (unsigned long)(LUT16[15] * 1000.0f) + 3000;
   unsigned long waitStart = millis();
-  String lastResponse = "(none)";
+  String lastResponse = F("(none)");
   bool isBusy = true;
   while (isBusy) {
     if (checkEStop() || checkCancel()) return;
@@ -78,20 +78,20 @@ void waitForPrinthead() {
     // about to send. Since there's no request/response ID, that stale "S:0" gets treated
     // as if it answered the current query, ending the wait before the Nano is actually done.
     while (PRINTHEAD_SERIAL.available()) PRINTHEAD_SERIAL.read();
-    PRINTHEAD_SERIAL.print("S\n");
+    PRINTHEAD_SERIAL.print(F("S\n"));
     unsigned long timeout = millis();
     while (!PRINTHEAD_SERIAL.available() && millis() - timeout < 10) {}
     if (PRINTHEAD_SERIAL.available()) {
       String response = PRINTHEAD_SERIAL.readStringUntil('\n');
       response.trim();
       lastResponse = response;
-      if (response == "S:0") isBusy = false;
+      if (response == F("S:0")) isBusy = false;
     }
   }
 }
 
 bool isProbeTriggered() {
-  PRINTHEAD_SERIAL.print("P\n");
+  PRINTHEAD_SERIAL.print(F("P\n"));
   unsigned long timeout = millis();
   while (!PRINTHEAD_SERIAL.available() && millis() - timeout < 100) {
     // Don't classify/query the Nano from inside this wait -- that would overlap two
@@ -101,7 +101,7 @@ bool isProbeTriggered() {
   }
   if (PRINTHEAD_SERIAL.available()) {
     String response = PRINTHEAD_SERIAL.readStringUntil('\n'); response.trim();
-    if (response == "P:1") return true;
+    if (response == F("P:1")) return true;
   }
   return false;
 }
@@ -121,12 +121,12 @@ bool isZMaxSwitchPressed() {
 static bool eStopAnnounced = false;
 
 int queryNanoLimitMask() {
-  PRINTHEAD_SERIAL.print("L\n");
+  PRINTHEAD_SERIAL.print(F("L\n"));
   unsigned long timeout = millis();
   while (!PRINTHEAD_SERIAL.available() && millis() - timeout < 100) {}
   if (PRINTHEAD_SERIAL.available()) {
     String resp = PRINTHEAD_SERIAL.readStringUntil('\n'); resp.trim();
-    if (resp.startsWith("L:")) return resp.substring(2).toInt();
+    if (resp.startsWith(F("L:"))) return resp.substring(2).toInt();
   }
   return -1; // Nano not responding -- never assume this means "safe".
 }
@@ -135,16 +135,16 @@ int queryNanoLimitMask() {
 // that's sent separately). Reports OFFLINE even if espOnline is still true whenever an
 // e-stop is latched, since the machine can't accept a new job until it's cleared.
 void reportEspIdleState() {
-  ESP_SERIAL.println((espOnline && !eStopLatched) ? "STATE:ONLINE" : "STATE:OFFLINE");
+  ESP_SERIAL.println((espOnline && !eStopLatched) ? F("STATE:ONLINE") : F("STATE:OFFLINE"));
 }
 
 static String describeEStopCause(int mask) {
-  if (mask < 0) return "NANO OFFLINE";
-  if (mask == 0) return "UNKNOWN";
+  if (mask < 0) return F("NANO OFFLINE");
+  if (mask == 0) return F("UNKNOWN");
   String s;
-  if (mask & 0x1) s += "Z ";
-  if (mask & 0x2) s += "Y ";
-  if (mask & 0x4) s += "OVERTEMP ";
+  if (mask & 0x1) s += F("Z ");
+  if (mask & 0x2) s += F("Y ");
+  if (mask & 0x4) s += F("OVERTEMP ");
   return s;
 }
 
@@ -196,7 +196,7 @@ void moveZStepsRelative(long deltaSteps) {
   delayMicroseconds(5); // Setup time for DIR pin
   
   // Z-axis lead screws need to run slower than X/Y belts to avoid stalling.
-  int zDelay = max(1000, STEP_PERIOD_US * 4);
+  int zDelay = max(1000, Z_STEP_PERIOD_US * 4);
   
   for (long i = 0; i < steps; ++i) {
     if (checkEStop() || checkCancel()) break;
@@ -209,12 +209,12 @@ void moveZStepsRelative(long deltaSteps) {
 }
 
 void deployProbe() {
-  PRINTHEAD_SERIAL.print("D\n");
+  PRINTHEAD_SERIAL.print(F("D\n"));
   delay(500);
 }
 
 void stowProbe() {
-  PRINTHEAD_SERIAL.print("U\n");
+  PRINTHEAD_SERIAL.print(F("U\n"));
   delay(500);
 }
 
@@ -226,7 +226,7 @@ void moveZSteps(long targetStepsZ) {
   digitalWrite(PIN_Z_DIR, dir ? HIGH : LOW);
   delayMicroseconds(5);
   
-  int zDelay = max(1000, STEP_PERIOD_US * 4);
+  int zDelay = max(1000, Z_STEP_PERIOD_US * 4);
 
   for (long i = 0; i < steps; ++i) {
     if (checkEStop() || checkCancel()) break;
@@ -240,7 +240,7 @@ void moveZSteps(long targetStepsZ) {
 
 void homeZ() {
   zHomingActive = true;
-  int zDelay = max(1000, STEP_PERIOD_US * 4);
+  int zDelay = max(1000, Z_STEP_PERIOD_US * 4);
 
   digitalWrite(PIN_Z_DIR, LOW);
   delayMicroseconds(5);
@@ -309,7 +309,7 @@ void zPulse(bool dir) {
 
 float probeZ() {
   deployProbe();
-  int zDelay = max(1000, STEP_PERIOD_US * 4);
+  int zDelay = max(1000, Z_STEP_PERIOD_US * 4);
   digitalWrite(PIN_Z_DIR, HIGH);
   delayMicroseconds(5);
   zHomingActive = true; // The probe touch here is expected -- don't let it trip a full e-stop.
@@ -338,11 +338,8 @@ float probeZ() {
   return trigger_height;
 }
 
-void stepPulseOnceX() { digitalWrite(PIN_STEP, HIGH); delayMicroseconds(STEP_PULSE_US); digitalWrite(PIN_STEP, LOW); }
-inline void yPulseLeft()  { digitalWrite(PIN_YL_STEP, HIGH); delayMicroseconds(STEP_PULSE_US); digitalWrite(PIN_YL_STEP, LOW); }
-inline void yPulseRight() { digitalWrite(PIN_YR_STEP, HIGH); delayMicroseconds(STEP_PULSE_US); digitalWrite(PIN_YR_STEP, LOW); }
-
 void stepN(long n, bool dir) {
+  if (n <= 0) return;
   // yStepPair (below) self-enables the driver the same way; stepN never did, so any X
   // move issued while something upstream last left PIN_EN disabled (e.g. doPrintBMPSlice-
   // Serpentine's own cleanup, which sets it HIGH when a print finishes) pulsed PIN_STEP
@@ -350,7 +347,6 @@ void stepN(long n, bool dir) {
   // motor didn't turn, but the tracked position still claimed it had. This was the real
   // cause of X silently "reaching 0" after a print without physically moving.
   digitalWrite(PIN_EN, LOW);
-  digitalWrite(PIN_DIR, dir ? HIGH : LOW);
   float currentY_mm = currentStepsY / STEPS_PER_MM_Y;
   float targetX_mm = (currentSteps + (dir ? n : -n)) / STEPS_PER_MM_X;
   long startZ = currentStepsZ;
@@ -359,18 +355,28 @@ void stepN(long n, bool dir) {
   dz = abs(dz);
   long err = n / 2;
 
-  for (long i = 0; i < n; ++i) {
+  // AccelStepper paces the actual pulses (with an acceleration ramp instead of the old
+  // fixed STEP_PERIOD_US); currentPosition() changing is our "a step just fired" signal,
+  // replacing the old for-loop index for both currentSteps bookkeeping and the mesh
+  // Z-interleave Bresenham below (that math only ever depended on step count, not timing).
+  stepperX.move(dir ? n : -n);
+  long lastPos = stepperX.currentPosition();
+  while (stepperX.distanceToGo() != 0) {
     if (checkEStop() || checkCancel()) break;
-    stepPulseOnceX(); currentSteps += dir ? 1 : -1;
-    if (mesh_active && dz > 0) { err -= dz;
-      if (err < 0) { zPulse(zDir); err += n; } }
-    delayMicroseconds(max(0, STEP_PERIOD_US - STEP_PULSE_US));
+    stepperX.run();
+    long pos = stepperX.currentPosition();
+    if (pos != lastPos) {
+      lastPos = pos;
+      currentSteps += dir ? 1 : -1;
+      if (mesh_active && dz > 0) { err -= dz;
+        if (err < 0) { zPulse(zDir); err += n; } }
+    }
   }
 }
 
 void yStepPair(long stepsL, long stepsR, bool dir) {
   if (stepsL <= 0 && stepsR <= 0) return;
-  digitalWrite(PIN_Y_DIR, dir ? HIGH : LOW); digitalWrite(PIN_YR_DIR, dir ? HIGH : LOW); digitalWrite(PIN_EN, LOW);
+  digitalWrite(PIN_EN, LOW);
   long N = max(stepsL, stepsR);
   float currentX_mm = currentSteps / STEPS_PER_MM_X;
   float targetY_mm = (currentStepsY + (dir ? N : -N)) / STEPS_PER_MM_Y;
@@ -379,17 +385,42 @@ void yStepPair(long stepsL, long stepsR, bool dir) {
   long dz = targetZ - startZ;
   bool zDir = (dz > 0); dz = abs(dz);
   long err = N / 2;
-  long accL = 0, accR = 0;
 
-  for (long i = 0; i < N; ++i) {
+  // When stepsL != stepsR (yMoveSkewMM), scale the shorter axis's speed/accel down by its
+  // share of the longer axis's distance so both motors' trapezoid profiles take the same
+  // elapsed time and finish together -- otherwise the shorter side would idle early while
+  // the other kept moving, racking the gantry beam that bridges both lead screws.
+  float ratioL = (float)stepsL / (float)N;
+  float ratioR = (float)stepsR / (float)N;
+  float baseSpeed = CFG.maxSpeedYmm * STEPS_PER_MM_Y;
+  float baseAccel = CFG.accelYmm * STEPS_PER_MM_Y;
+  stepperYL.setMaxSpeed(baseSpeed * ratioL); stepperYL.setAcceleration(baseAccel * ratioL);
+  stepperYR.setMaxSpeed(baseSpeed * ratioR); stepperYR.setAcceleration(baseAccel * ratioR);
+
+  stepperYL.move(dir ? stepsL : -stepsL);
+  stepperYR.move(dir ? stepsR : -stepsR);
+
+  // Whichever side got the unscaled (ratio 1.0) distance always takes exactly N steps --
+  // same as the old loop's iteration count -- so it's the reference for currentStepsY and
+  // the mesh Z-interleave, exactly mirroring the previous loop-index-based Bresenham.
+  AccelStepper &ref = (stepsL >= stepsR) ? stepperYL : stepperYR;
+  long lastPos = ref.currentPosition();
+
+  while (stepperYL.distanceToGo() != 0 || stepperYR.distanceToGo() != 0) {
     if (checkEStop() || checkCancel()) break;
-    accL += stepsL; accR += stepsR;
-    if (accL >= N) { yPulseLeft(); accL -= N; }
-    if (accR >= N) { yPulseRight(); accR -= N; }
-    currentStepsY += dir ? 1 : -1;
-    if (mesh_active && dz > 0) { err -= dz; if (err < 0) { zPulse(zDir); err += N; } }
-    delayMicroseconds(max(0, STEP_PERIOD_US - STEP_PULSE_US));
+    stepperYL.run();
+    stepperYR.run();
+    long pos = ref.currentPosition();
+    if (pos != lastPos) {
+      lastPos = pos;
+      currentStepsY += dir ? 1 : -1;
+      if (mesh_active && dz > 0) { err -= dz; if (err < 0) { zPulse(zDir); err += N; } }
+    }
   }
+
+  // Restore full speed/accel so the next (presumably unskewed) call isn't left scaled down.
+  stepperYL.setMaxSpeed(baseSpeed); stepperYL.setAcceleration(baseAccel);
+  stepperYR.setMaxSpeed(baseSpeed); stepperYR.setAcceleration(baseAccel);
 }
 
 
@@ -402,46 +433,30 @@ float lutExposureFromByte(uint8_t v) {
   return LUT16[idx] + t*(LUT16[idx+1] - LUT16[idx]);
 }
 
-void moveToSteps(long target) { 
-  long d = target - currentSteps; 
-  if (d) {
-    int oldPeriod = STEP_PERIOD_US;
-    STEP_PERIOD_US = max(STEP_PULSE_US + 10, oldPeriod / 4);
-    stepN(labs(d), d > 0); 
-    STEP_PERIOD_US = oldPeriod;
-  }
+void moveToSteps(long target) {
+  long d = target - currentSteps;
+  if (d) stepN(labs(d), d > 0);
 }
 
 void moveToPixel(long p) { moveToSteps(p * (long)STEPS_PER_PIXEL); }
 
-void yMoveMM(float mm, bool forward) { 
-  long s = lround_double(mm * STEPS_PER_MM_Y); 
-  int oldPeriod = STEP_PERIOD_US;
-  STEP_PERIOD_US = max(STEP_PULSE_US + 10, oldPeriod / 4);
-  yStepPair(s, s, forward); 
-  STEP_PERIOD_US = oldPeriod;
+void yMoveMM(float mm, bool forward) {
+  long s = lround_double(mm * STEPS_PER_MM_Y);
+  yStepPair(s, s, forward);
 }
 
 void yMoveSkewMM(float baseMM, float deltaRightMM, bool forward) {
   long sL = lround_double(baseMM * STEPS_PER_MM_Y);
   long sR = lround_double((baseMM + deltaRightMM) * STEPS_PER_MM_Y);
   if (sR < 0) sR = 0;
-  int oldPeriod = STEP_PERIOD_US;
-  STEP_PERIOD_US = max(STEP_PULSE_US + 10, oldPeriod / 4);
   yStepPair(sL, sR, forward);
-  STEP_PERIOD_US = oldPeriod;
 }
 
 // Y-axis counterpart to moveToSteps() for X: moves to an absolute Y step target from
 // wherever currentStepsY currently tracks.
 void moveYToSteps(long target) {
   long d = target - currentStepsY;
-  if (d) {
-    int oldPeriod = STEP_PERIOD_US;
-    STEP_PERIOD_US = max(STEP_PULSE_US + 10, oldPeriod / 4);
-    yStepPair(labs(d), labs(d), d > 0);
-    STEP_PERIOD_US = oldPeriod;
-  }
+  if (d) yStepPair(labs(d), labs(d), d > 0);
 }
 
 void moveYToZero() { moveYToSteps(0); }
@@ -461,7 +476,7 @@ void moveYToZero() { moveYToSteps(0); }
 // Discarding any queued Back-button press and clearing cancelRequested immediately before
 // each leg closes both gaps (eStopLatched is left alone -- that's a real safety fault and
 // must still block whichever leg hasn't run yet).
-void moveToXYSteps(long targetX, long targetY, const char* title, const char* subtitle) {
+void moveToXYSteps(long targetX, long targetY, const __FlashStringHelper* title, const __FlashStringHelper* subtitle) {
   oledHeader(title); display.setCursor(0, 20); display.print(subtitle); display.sendBuffer();
   readButton(btnBack);
   cancelRequested = false;
@@ -477,7 +492,7 @@ void moveToXYSteps(long targetX, long targetY, const char* title, const char* su
 // Returns the carriage to true X=0, Y=0 (neither axis has a hardware home switch --
 // only Z does; this is purely the tracked step counts).
 void homeXY() {
-  moveToXYSteps(0, 0, "Homing", "Returning to origin");
+  moveToXYSteps(0, 0, F("Homing"), F("Returning to origin"));
 }
 
 // Moves to the configured print-start position (CFG.offsetXmm/offsetYmm from true home)
@@ -486,7 +501,7 @@ void homeXY() {
 void moveToOffset() {
   long targetX = lround_double(CFG.offsetXmm * STEPS_PER_MM_X);
   long targetY = lround_double(CFG.offsetYmm * STEPS_PER_MM_Y);
-  moveToXYSteps(targetX, targetY, "Positioning", "Moving to print pos");
+  moveToXYSteps(targetX, targetY, F("Positioning"), F("Moving to print pos"));
 }
 
 // Parks the carriage clear of the bed: X at true home, Y at the paper-load line
@@ -496,15 +511,12 @@ void moveToOffset() {
 // step (so a new sheet can be placed). Same physical spot for both, which means the
 // post-print park position doubles as the next job's load position with zero extra travel.
 void moveClearOfBed() {
-  moveToXYSteps(0, lround_double(PAPER_LOAD_Y_MM * STEPS_PER_MM_Y), "Clearing Bed", "Moving clear of print");
+  moveToXYSteps(0, lround_double(PAPER_LOAD_Y_MM * STEPS_PER_MM_Y), F("Clearing Bed"), F("Moving clear of print"));
 }
 
-void xMoveMM(float mm, bool right) { 
-  long s = lround_double(mm * STEPS_PER_MM_X); 
-  int oldPeriod = STEP_PERIOD_US;
-  STEP_PERIOD_US = max(STEP_PULSE_US + 10, oldPeriod / 4);
-  stepN(s, right); 
-  STEP_PERIOD_US = oldPeriod;
+void xMoveMM(float mm, bool right) {
+  long s = lround_double(mm * STEPS_PER_MM_X);
+  stepN(s, right);
 }
 
 void zMoveMM(float mm, bool down) { 
@@ -753,9 +765,9 @@ bool readFourRowsBy(RowSource &src, int visualStart, Image4x &img) {
   return true;
 }
 
-void countdown_1s_tenths(const char* label) {
+void countdown_1s_tenths(const __FlashStringHelper* label) {
   oledHeader(label);
-  display.setCursor(0, 20); display.print("Starting in:");
+  display.setCursor(0, 20); display.print(F("Starting in:"));
   display.sendBuffer();
   for (int i = 10; i >= 0; --i) {
     display.setDrawColor(0); display.drawBox(0, 35, 128, 20); display.setDrawColor(1);
@@ -763,7 +775,7 @@ void countdown_1s_tenths(const char* label) {
     // Closest u8g2 stand-in for Adafruit GFX's setTextSize(2); may need retuning to fit
     // the 20px-tall cleared box once you see it on the actual panel.
     display.setFont(u8g2_font_ncenB14_tr);
-    displayPrintf(display, "%d.%d s", i/10, i%10);
+    displayPrintf(display, F("%d.%d s"), i/10, i%10);
     display.setFont(u8g2_font_6x10_tf);
     display.sendBuffer();
     delay(100);
@@ -784,19 +796,19 @@ void countdown_1s_tenths(const char* label) {
 void printEntireBMP(const String &path) {
   BMPMeta meta;
   if (!loadBMPMeta(path, meta)) {
-    oledHeader("BMP"); display.setCursor(0,20); display.print("Header error");
+    oledHeader(F("BMP")); display.setCursor(0,20); display.print(F("Header error"));
     display.setCursor(0,32); display.print(path); display.sendBuffer(); delay(1200);
     return;
   }
 
   const int totalSlices = (meta.H + 3) / 4;
 
-  oledHeader("Print (Serpentine)");
+  oledHeader(F("Print (Serpentine)"));
   display.setCursor(0, 16); display.print(path);
   display.setCursor(0, 28);
-  displayPrintf(display,"W=%d  H=%d", meta.W, meta.H);
-  display.setCursor(0, 40); displayPrintf(display,"%d slices (4 rows ea.)", totalSlices);
-  display.setCursor(0, 54); display.print("[Enter] Start  [-] Back");
+  displayPrintf(display, F("W=%d  H=%d"), meta.W, meta.H);
+  display.setCursor(0, 40); displayPrintf(display, F("%d slices (4 rows ea.)"), totalSlices);
+  display.setCursor(0, 54); display.print(F("[Enter] Start  [-] Back"));
   display.sendBuffer();
 
   while (true) {
@@ -806,24 +818,24 @@ void printEntireBMP(const String &path) {
     delay(10);
   }
 
-  countdown_1s_tenths("Starting Print");
+  countdown_1s_tenths(F("Starting Print"));
   for (int slice = 0; slice < totalSlices; ++slice) {
     if (eStopLatched || cancelRequested) return;
     const int visualStart = slice * 4;
     Image4x img;
     if (!readFourRowsAt(path, meta, visualStart, img)) {
-      oledHeader("BMP");
+      oledHeader(F("BMP"));
       display.setCursor(0, 20);
-      display.print("Read error at slice ");
+      display.print(F("Read error at slice "));
       display.print(slice+1); display.sendBuffer(); delay(1200);
       return;
     }
 
-    oledHeader("Printing...");
+    oledHeader(F("Printing..."));
     display.setCursor(0, 18); display.print(path);
     display.setCursor(0, 30);
-    displayPrintf(display,"Slice %d/%d", slice+1, totalSlices);
-    display.setCursor(0, 42); displayPrintf(display,"Rows %d..%d", visualStart, min(meta.H-1, visualStart+3));
+    displayPrintf(display, F("Slice %d/%d"), slice+1, totalSlices);
+    display.setCursor(0, 42); displayPrintf(display, F("Rows %d..%d"), visualStart, min(meta.H-1, visualStart+3));
     display.sendBuffer();
     const bool forward = (slice % 2 == 0);
     doPrintBMPSliceSerpentine(img, forward, false, true);
@@ -831,7 +843,7 @@ void printEntireBMP(const String &path) {
       bool none[4] = {false,false,false,false};
       // String(float,N) rather than snprintf's %f: this build has no -lprintf_flt, so
       // avr-libc's snprintf renders %f as a literal '?' instead of a number.
-      String buf = "Y +" + String(CFG.yBandAdvanceMM, 2) + "mm";
+      String buf = String(F("Y +")) + String(CFG.yBandAdvanceMM, 2) + F("mm");
 
 /**
  * @brief Prints a BMP image using an interlaced/staggered approach, advancing one row at a time.
@@ -848,8 +860,8 @@ void printEntireBMP(const String &path) {
     }
   }
 
-  oledHeader("Print");
-  display.setCursor(0, 22); display.print("Entire image done.");
+  oledHeader(F("Print"));
+  display.setCursor(0, 22); display.print(F("Entire image done."));
   display.sendBuffer();
   delay(1200);
 }
@@ -858,8 +870,8 @@ void printEntireBMP(const String &path) {
 // which one it's got.
 static void printFromRowSource(RowSource &src, const String &label, bool skipStartPrompt) {
   if (src.width <= 0 || src.height <= 0) {
-    oledHeader("Print Error"); display.setCursor(0, 20);
-    display.print("Bad image"); display.sendBuffer(); delay(2000);
+    oledHeader(F("Print Error")); display.setCursor(0, 20);
+    display.print(F("Bad image")); display.sendBuffer(); delay(2000);
     return;
   }
 
@@ -869,12 +881,12 @@ static void printFromRowSource(RowSource &src, const String &label, bool skipSta
   const int totalSlices = src.height + 3;
 
   if (!skipStartPrompt) {
-    oledHeader("Print (Four Passes)");
+    oledHeader(F("Print (Four Passes)"));
     display.setCursor(0, 16); display.print(label);
     display.setCursor(0, 28);
-    displayPrintf(display,"W=%d  H=%d", src.width, src.height);
-    display.setCursor(0, 40); displayPrintf(display,"%d passes (1 rows ea.)", totalSlices);
-    display.setCursor(0, 54); display.print("[Enter] Start  [-] Back");
+    displayPrintf(display, F("W=%d  H=%d"), src.width, src.height);
+    display.setCursor(0, 40); displayPrintf(display, F("%d passes (1 rows ea.)"), totalSlices);
+    display.setCursor(0, 54); display.print(F("[Enter] Start  [-] Back"));
     display.sendBuffer();
 
     while (true) {
@@ -885,7 +897,7 @@ static void printFromRowSource(RowSource &src, const String &label, bool skipSta
     }
   }
 
-  countdown_1s_tenths("Starting Print");
+  countdown_1s_tenths(F("Starting Print"));
 
   for (int slice = 0; slice < totalSlices; ++slice) {
     if (eStopLatched || cancelRequested) return;
@@ -893,9 +905,9 @@ static void printFromRowSource(RowSource &src, const String &label, bool skipSta
     Image4x img;
 
     if (!readFourRowsBy(src, visualStart, img)) {
-      oledHeader("Print Error");
-      display.setCursor(0, 16); display.print("Read failed");
-      display.setCursor(0, 28); display.print("Slice: "); display.print(slice);
+      oledHeader(F("Print Error"));
+      display.setCursor(0, 16); display.print(F("Read failed"));
+      display.setCursor(0, 28); display.print(F("Slice: ")); display.print(slice);
       display.sendBuffer(); delay(2000);
       return;
     }
@@ -903,10 +915,10 @@ static void printFromRowSource(RowSource &src, const String &label, bool skipSta
     // Row is steady for the whole slice, so redraw it once here rather than on every
     // column -- doPrintBMPSliceSerpentine only touches the footer LED/col row.
     const int rowShown = min(slice + 1, src.height);
-    ESP_SERIAL.print("PROGRESS:"); ESP_SERIAL.print(rowShown); ESP_SERIAL.print(",");
-    ESP_SERIAL.print(src.height); ESP_SERIAL.print("\n");
-    oledHeader("Printing");
-    display.setCursor(0, 12); displayPrintf(display, "Row %d/%d", rowShown, src.height);
+    ESP_SERIAL.print(F("PROGRESS:")); ESP_SERIAL.print(rowShown); ESP_SERIAL.print(F(","));
+    ESP_SERIAL.print(src.height); ESP_SERIAL.print(F("\n"));
+    oledHeader(F("Printing"));
+    display.setCursor(0, 12); displayPrintf(display, F("Row %d/%d"), rowShown, src.height);
     display.setCursor(0, 24); display.print(label);
     display.sendBuffer();
 
@@ -915,13 +927,13 @@ static void printFromRowSource(RowSource &src, const String &label, bool skipSta
 
     if (slice < totalSlices - 1) {
       bool none[4] = {false,false,false,false};
-      drawStatusRow(none, "Y +" + String(CFG.mmPerPixel, 2) + "mm");
+      drawStatusRow(none, String(F("Y +")) + String(CFG.mmPerPixel, 2) + F("mm"));
       yMoveMM(CFG.mmPerPixel, true);
     }
   }
 
-  oledHeader("Print");
-  display.setCursor(0, 22); display.print("Entire image done.");
+  oledHeader(F("Print"));
+  display.setCursor(0, 22); display.print(F("Entire image done."));
   display.sendBuffer();
   delay(1200);
 }
@@ -934,7 +946,7 @@ static void printFromRowSource(RowSource &src, const String &label, bool skipSta
 void printEntireBMP_4by(const String &path) {
   BMPFileRowSource src;
   if (!src.open(path)) {
-    oledHeader("BMP ERROR"); display.setCursor(0,20); display.print("Header error");
+    oledHeader(F("BMP ERROR")); display.setCursor(0,20); display.print(F("Header error"));
     display.sendBuffer(); delay(2000);
     return;
   }
@@ -944,7 +956,7 @@ void printEntireBMP_4by(const String &path) {
   // of before.
   moveToOffset();
   printOriginStepsX = lround_double(CFG.offsetXmm * STEPS_PER_MM_X);
-  ESP_SERIAL.println("STATE:PRINTING");
+  ESP_SERIAL.println(F("STATE:PRINTING"));
   printFromRowSource(src, path, false);
   printOriginStepsX = 0;
   // Unlike the ESP32-triggered path (runIncomingPrint), nothing else moves this one
@@ -957,8 +969,8 @@ void printEntireBMP_4by(const String &path) {
 void printHexData_4by(int w, int h, const String &hexData, bool skipStartPrompt) {
   HexRowSource src;
   src.init(w, h, hexData);
-  ESP_SERIAL.println("STATE:PRINTING");
-  printFromRowSource(src, "ESP32", skipStartPrompt);
+  ESP_SERIAL.println(F("STATE:PRINTING"));
+  printFromRowSource(src, F("ESP32"), skipStartPrompt);
   reportEspIdleState();
 }
 
@@ -1136,7 +1148,7 @@ void printCalibrationPattern(float maxTimeSec) {
       }
 
       if (activeCount > 0) {
-        drawStatusRow(willFire, "R" + String(row) + " X" + String(x_carriage, 0) + "mm");
+        drawStatusRow(willFire, String(F("R")) + String(row) + F(" X") + String(x_carriage, 0) + F("mm"));
         sendBatchToPrinthead(durations);
         waitForPrinthead();
       }

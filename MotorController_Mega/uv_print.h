@@ -42,7 +42,7 @@ void moveYToSteps(long target);
 // Shared absolute X+Y mover used by homeXY(), moveToOffset(), and testOffset()'s return
 // trip -- see its definition for why the stale-button/e-stop handling around each leg
 // matters.
-void moveToXYSteps(long targetX, long targetY, const char* title, const char* subtitle);
+void moveToXYSteps(long targetX, long targetY, const __FlashStringHelper* title, const __FlashStringHelper* subtitle);
 void homeXY();
 void moveToOffset();
 void moveClearOfBed();
@@ -51,7 +51,7 @@ void zMoveMM(float mm, bool down);
 
 void printEntireBMP(const String &path);
 void printEntireBMP_4by(const String &path);
-void countdown_1s_tenths(const char* label);
+void countdown_1s_tenths(const __FlashStringHelper* label);
 
 // Runs the exact same validated 4-pass print engine as printEntireBMP_4by(), but reads
 // pixels straight from the in-memory hex string the ESP32 sent (no SD round-trip).

@@ -11,20 +11,20 @@ static String trimBoth(const String &s) {
   return s.substring(a, b);
 }
 
-static bool parseFloatKey(const String &line, const char* key, float &out) {
-  String k(key); k += "=";
+static bool parseFloatKey(const String &line, const __FlashStringHelper* key, float &out) {
+  String k(key); k += F("=");
   if (!line.startsWith(k)) return false;
   out = trimBoth(line.substring(k.length())).toFloat(); return true;
 }
 
-static bool parseIntKey(const String &line, const char* key, int &out) {
-  String k(key); k += "="; 
+static bool parseIntKey(const String &line, const __FlashStringHelper* key, int &out) {
+  String k(key); k += F("=");
   if (!line.startsWith(k)) return false;
   out = trimBoth(line.substring(k.length())).toInt(); return true;
 }
 
-static bool parseFloatCSV4(const String &line, const char* key, float out[4]) {
-  String k(key); k += "=";
+static bool parseFloatCSV4(const String &line, const __FlashStringHelper* key, float out[4]) {
+  String k(key); k += F("=");
   if (!line.startsWith(k)) return false;
   String rest = line.substring(k.length());
   int idx = 0, start = 0;
@@ -49,30 +49,36 @@ bool loadConfigFromSD(const char* path) {
   // the file rather than silently defaulting every boot with no record of it on disk.
   bool sawOffsetX = false, sawOffsetY = false;
   while (f.available()) {
-    line = f.readStringUntil('\n'); line.replace("\r", "");
+    line = f.readStringUntil('\n'); line.replace(F("\r"), F(""));
     line = trimBoth(line);
     if (!line.length()) continue;
     low = line;
     low.toLowerCase();
-    if (low.startsWith("#") || low.startsWith(";")) continue;
+    if (low.startsWith(F("#")) || low.startsWith(F(";"))) continue;
 
-    if (low.startsWith("y_band_mm="))      { parseFloatKey(low, "y_band_mm", CFG.yBandAdvanceMM); continue; }
-    if (low.startsWith("mm_per_pixel="))   { parseFloatKey(low, "mm_per_pixel", CFG.mmPerPixel); continue; }
-    if (low.startsWith("led_spacing_mm=")) { parseFloatKey(low, "led_spacing_mm", CFG.ledSpacingMM); continue; }
-    if (low.startsWith("step_period_us=")){ parseIntKey  (low, "step_period_us", CFG.stepPeriodUs); continue; }
-    if (low.startsWith("step_pulse_us="))  { parseIntKey  (low, "step_pulse_us",  CFG.stepPulseUs ); continue; }
-    if (low.startsWith("offset_x_mm="))    { parseFloatKey(low, "offset_x_mm", CFG.offsetXmm); sawOffsetX = true; continue; }
-    if (low.startsWith("offset_y_mm="))    { parseFloatKey(low, "offset_y_mm", CFG.offsetYmm); sawOffsetY = true; continue; }
+    // parseXxxKey() itself checks the "key=" prefix, so there's no need for a separate
+    // startsWith() gate duplicating each key string before it -- one copy of each name,
+    // in flash via F(), instead of two.
+    if (parseFloatKey(low, F("y_band_mm"), CFG.yBandAdvanceMM)) continue;
+    if (parseFloatKey(low, F("mm_per_pixel"), CFG.mmPerPixel)) continue;
+    if (parseFloatKey(low, F("led_spacing_mm"), CFG.ledSpacingMM)) continue;
+    if (parseIntKey  (low, F("step_pulse_us"), CFG.stepPulseUs)) continue;
+    if (parseFloatKey(low, F("offset_x_mm"), CFG.offsetXmm)) { sawOffsetX = true; continue; }
+    if (parseFloatKey(low, F("offset_y_mm"), CFG.offsetYmm)) { sawOffsetY = true; continue; }
+    if (parseFloatKey(low, F("max_speed_x_mm"), CFG.maxSpeedXmm)) continue;
+    if (parseFloatKey(low, F("accel_x_mm"), CFG.accelXmm)) continue;
+    if (parseFloatKey(low, F("max_speed_y_mm"), CFG.maxSpeedYmm)) continue;
+    if (parseFloatKey(low, F("accel_y_mm"), CFG.accelYmm)) continue;
 
-    if (low.startsWith("led_scales="))     { parseFloatCSV4(low, "led_scales", CFG.ledScale); continue; }
-    if (low.startsWith("led1_scale="))     { parseFloatKey (low, "led1_scale", CFG.ledScale[0]); continue; }
-    if (low.startsWith("led2_scale="))     { parseFloatKey (low, "led2_scale", CFG.ledScale[1]); continue; }
-    if (low.startsWith("led3_scale="))     { parseFloatKey (low, "led3_scale", CFG.ledScale[2]); continue; }
-    if (low.startsWith("led4_scale="))     { parseFloatKey (low, "led4_scale", CFG.ledScale[3]); continue; }
+    if (parseFloatCSV4(low, F("led_scales"), CFG.ledScale)) continue;
+    if (parseFloatKey(low, F("led1_scale"), CFG.ledScale[0])) continue;
+    if (parseFloatKey(low, F("led2_scale"), CFG.ledScale[1])) continue;
+    if (parseFloatKey(low, F("led3_scale"), CFG.ledScale[2])) continue;
+    if (parseFloatKey(low, F("led4_scale"), CFG.ledScale[3])) continue;
 
-    if (low.startsWith("invert_image=")) {
-      String k("invert_image="); String v = trimBoth(low.substring(k.length())); v.toLowerCase();
-      CFG.invertImage = (v=="1" || v=="true" || v=="yes" || v=="on"); continue;
+    if (low.startsWith(F("invert_image="))) {
+      String k(F("invert_image=")); String v = trimBoth(low.substring(k.length())); v.toLowerCase();
+      CFG.invertImage = (v==F("1") || v==F("true") || v==F("yes") || v==F("on")); continue;
     }
   }
   f.close();
@@ -86,12 +92,13 @@ bool loadConfigFromSD(const char* path) {
 void applyConfig() {
   MM_PER_PIXEL   = CFG.mmPerPixel;
   LED_SPACING_MM = CFG.ledSpacingMM;
-  STEP_PERIOD_US = CFG.stepPeriodUs;
   STEP_PULSE_US  = CFG.stepPulseUs;
   for (int i = 0; i < 4; i++) LED_SCALE[i] = CFG.ledScale[i];
 
   STEPS_PER_PIXEL = max(1, (int)(STEPS_PER_MM_X * MM_PER_PIXEL + 0.5f));
   OFFSET_PIXELS   = max(1, (int)(LED_SPACING_MM / MM_PER_PIXEL + 0.5f));
+
+  applyMotionConfig();
 }
 
 void writeDefaultConfigIfMissing(const char* path) {
@@ -101,23 +108,25 @@ void writeDefaultConfigIfMissing(const char* path) {
     Serial.println(F("[CFG] Could not create default config"));
     return;
   }
-  f.println("# UV Printer config (key=value). Comments start with # or ;");
-  f.println("y_band_mm=8.2");
-  f.println("mm_per_pixel=2.0");
-  f.println("led_spacing_mm=7.0");
-  f.println("step_period_us=1000");
-  f.println("step_pulse_us=5");
-  f.println("led_scales=1.000,1.000,1.000,1.000");
-  f.println("invert_image=1");
-  f.println("offset_x_mm=0.0");
-  f.println("offset_y_mm=0.0");
+  f.println(F("# UV Printer config (key=value). Comments start with # or ;"));
+  f.println(F("y_band_mm=8.2"));
+  f.println(F("mm_per_pixel=2.0"));
+  f.println(F("led_spacing_mm=7.0"));
+  f.println(F("step_pulse_us=5"));
+  f.println(F("led_scales=1.000,1.000,1.000,1.000"));
+  f.println(F("invert_image=1"));
+  f.println(F("offset_x_mm=0.0"));
+  f.println(F("offset_y_mm=0.0"));
+  f.println(F("max_speed_x_mm=10.0"));
+  f.println(F("accel_x_mm=20.0"));
+  f.println(F("max_speed_y_mm=10.0"));
+  f.println(F("accel_y_mm=20.0"));
   f.close();
 }
 
 bool saveConfigToSD(const char* path) {
   CFG.mmPerPixel     = MM_PER_PIXEL;
   CFG.ledSpacingMM   = LED_SPACING_MM;
-  CFG.stepPeriodUs   = STEP_PERIOD_US;
   CFG.stepPulseUs    = STEP_PULSE_US;
   for (int i = 0; i < 4; i++) CFG.ledScale[i] = LED_SCALE[i];
 
@@ -129,20 +138,23 @@ bool saveConfigToSD(const char* path) {
   File f = SD.open(path, FILE_WRITE);
   if (!f) return false;
 
-  f.println("# UV Printer config (generated by device)");
-  f.print  ("y_band_mm=");     f.println(String(CFG.yBandAdvanceMM, 3));
-  f.print  ("mm_per_pixel=");  f.println(String(CFG.mmPerPixel, 4));
-  f.print  ("led_spacing_mm=");f.println(String(CFG.ledSpacingMM, 3));
-  f.print  ("step_period_us=");f.println(CFG.stepPeriodUs);
-  f.print  ("step_pulse_us="); f.println(CFG.stepPulseUs);
-  f.print  ("offset_x_mm=");   f.println(String(CFG.offsetXmm, 3));
-  f.print  ("offset_y_mm=");   f.println(String(CFG.offsetYmm, 3));
-  f.print("led_scales=");
-  f.print(String(LED_SCALE[0],3)); f.print(",");
-  f.print(String(LED_SCALE[1],3)); f.print(",");
-  f.print(String(LED_SCALE[2],3)); f.print(",");
+  f.println(F("# UV Printer config (generated by device)"));
+  f.print(F("y_band_mm="));      f.println(String(CFG.yBandAdvanceMM, 3));
+  f.print(F("mm_per_pixel="));   f.println(String(CFG.mmPerPixel, 4));
+  f.print(F("led_spacing_mm=")); f.println(String(CFG.ledSpacingMM, 3));
+  f.print(F("step_pulse_us=")); f.println(CFG.stepPulseUs);
+  f.print(F("offset_x_mm="));    f.println(String(CFG.offsetXmm, 3));
+  f.print(F("offset_y_mm="));    f.println(String(CFG.offsetYmm, 3));
+  f.print(F("max_speed_x_mm=")); f.println(String(CFG.maxSpeedXmm, 2));
+  f.print(F("accel_x_mm="));     f.println(String(CFG.accelXmm, 2));
+  f.print(F("max_speed_y_mm=")); f.println(String(CFG.maxSpeedYmm, 2));
+  f.print(F("accel_y_mm="));     f.println(String(CFG.accelYmm, 2));
+  f.print(F("led_scales="));
+  f.print(String(LED_SCALE[0],3)); f.print(F(","));
+  f.print(String(LED_SCALE[1],3)); f.print(F(","));
+  f.print(String(LED_SCALE[2],3)); f.print(F(","));
   f.println(String(LED_SCALE[3],3));
-  f.print("invert_image="); f.println(CFG.invertImage ? "1" : "0");
+  f.print(F("invert_image=")); f.println(CFG.invertImage ? F("1") : F("0"));
   f.close();
   return true;
 }

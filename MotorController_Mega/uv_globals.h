@@ -22,6 +22,7 @@
 #include <stdarg.h>
 #include <stdio.h>
 #include <PinChangeInterrupt.h>
+#include <AccelStepper.h>
 #include "uv_types.h"
 
 // 2.42" SSD1309 128x64, hardware I2C, full-frame-buffer mode (matches the old
@@ -76,8 +77,22 @@ extern float STEPS_PER_MM_X, STEPS_PER_MM_Y, STEPS_PER_MM_Z;
 extern float MM_PER_PIXEL;
 extern int STEPS_PER_PIXEL, OFFSET_PIXELS;
 extern float LED_SPACING_MM;
-extern int STEP_PULSE_US, STEP_PERIOD_US;
+extern int STEP_PULSE_US;
+// Z lead screw pacing (bit-banged, unlike X/Y -- see uv_print.cpp's moveZSteps/homeZ/
+// probeZ). Unrelated to X/Y's AccelStepper speed/accel; matches the old default X/Y
+// STEP_PERIOD_US (1000us) that Z's delay had always effectively used.
+extern const int Z_STEP_PERIOD_US;
 extern const float PAPER_LOAD_Y_MM;
+
+// X/Y motion. stepN()/yStepPair() drive these via .move()+.run(); Z stays bit-banged
+// (see moveZSteps/homeZ/probeZ in uv_print.cpp) -- only X/Y needed the acceleration ramp.
+extern AccelStepper stepperX;
+extern AccelStepper stepperYL;
+extern AccelStepper stepperYR;
+// Applies CFG.maxSpeed{X,Y}mm/CFG.accel{X,Y}mm (in mm/s, mm/s^2) to the three steppers
+// above. Called once from setup() and again from applyConfig() whenever the SD config
+// reloads or the new OLED motion-speed menu saves a change.
+void applyMotionConfig();
 
 extern long currentSteps, currentStepsY, currentStepsZ;
 // Raw-step X origin the print engine (doPrintBMPSliceSerpentine) sweeps from/to for each

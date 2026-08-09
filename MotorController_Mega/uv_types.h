@@ -35,8 +35,13 @@ struct Config {
   float ledSpacingMM = 7.0f;
   bool invertImage = false;
   float ledScale[4] = {1.0f, 1.0f, 1.0f, 1.0f}; // Added missing array
-  int stepPeriodUs = 1000;                      // Added missing var
   int stepPulseUs = 5;                          // Added missing var
+  // X/Y AccelStepper motion profile, in physical units (mm/s, mm/s^2) like the rest of
+  // this struct -- converted to steps via STEPS_PER_MM_X/Y when applied to the steppers.
+  float maxSpeedXmm = 10.0f;
+  float accelXmm = 20.0f;
+  float maxSpeedYmm = 10.0f;
+  float accelYmm = 20.0f;
   // Where the printhead moves to before a print starts (instead of true X=0/Y=0), so the
   // print can be centered on paper that isn't aligned to the machine's absolute origin.
   float offsetXmm = 0.0f;

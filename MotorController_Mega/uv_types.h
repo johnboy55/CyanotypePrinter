@@ -3,7 +3,7 @@
 
 #include <Arduino.h>
 
-#define MAX_IMG_WIDTH 32 
+#define MAX_IMG_WIDTH 150
 
 struct Btn {
   uint8_t pin;

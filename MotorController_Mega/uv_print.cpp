@@ -36,7 +36,9 @@ struct BMPMeta {
   int rowStride;
 };
 
-const int MAX_ROWBUF = 256;
+// Must fit a full raw BMP row for the widest supported image: 150px * 3 bytes/px (24-bit),
+// padded to a 4-byte stride, is 452 bytes -- 512 leaves headroom.
+const int MAX_ROWBUF = 512;
 
 // ---------- UART API (Printhead) ----------
 void sendBatchToPrinthead(uint32_t durations[4]) {

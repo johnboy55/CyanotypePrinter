@@ -5,7 +5,8 @@
  * - Controls CR Touch (D3 Servo, D7 Signal)
  * - Background polls 2 TMP36 Temp Sensors
  * - NeoPixel Status Indicator on D8 (Message Queue)
- * - Optional I2C status OLED on A4/A5 (SDA/SCL) -- see oledPresent below
+ * - Optional I2C status OLED on A4/A5 (SDA/SCL), probed at boot and never drawn
+ *   while an LED is firing -- set OLED_ENABLED to 0 below to compile it out
  *
  * Requires (Library Manager): "Adafruit SSD1306" + "Adafruit GFX Library".
  * D4 and D9 are unused on V1.0 (no Y-limit switch, no Mega-side e-stop line);
@@ -13,12 +14,18 @@
  * A4/A5 free for the OLED's I2C bus instead of being TMP36 inputs.
  * ============================================================ */
 
+// Set to 0 to compile the OLED out entirely (frees A4/A5 and ~600 bytes of RAM) -- the
+// first thing to try if the UART link to the Mega ever misbehaves, to rule I2C out.
+#define OLED_ENABLED 0
+
 #include <Arduino.h>
 #include <Servo.h>
 #include <Adafruit_NeoPixel.h>
+#if OLED_ENABLED
 #include <Wire.h>
 #include <Adafruit_GFX.h>
 #include <Adafruit_SSD1306.h>
+#endif
 
 // --- Hardware Pins (Mapped to Custom PCB) ---
 const int PIN_LED[4]      = {10, 11, 12, 13};
@@ -33,14 +40,20 @@ const int PIN_NEOPIXEL    = 8;  // NEO_IN
 // Common 0.91" SSD1306 module is 128x32; a 0.96" module is 128x64 -- change
 // OLED_HEIGHT to 64 if that's what's wired. Set OLED_ADDR to 0x3D if the module
 // doesn't respond on the more common 0x3C (check its datasheet/silkscreen).
+#if OLED_ENABLED
 #define OLED_WIDTH  128
 #define OLED_HEIGHT 32
 #define OLED_ADDR   0x3C
 const unsigned long OLED_REFRESH_MS = 250;
 Adafruit_SSD1306 oled(OLED_WIDTH, OLED_HEIGHT, &Wire, -1);
-bool oledPresent = false;         // false if begin() found nothing on the bus -- OLED
-                                   // calls become no-ops so a board without one still runs.
+// Only true if the display ACKed its address at boot AND hasn't since caused an I2C
+// fault. Adafruit_SSD1306::begin() itself never checks for a device (it only fails on
+// malloc), so presence is probed explicitly in setup(). Once false it stays false:
+// the UART link and LED timing always take priority over the display.
+bool oledPresent = false;
 unsigned long lastOledUpdate = 0;
+uint16_t lastOledSig = 0xFFFF;    // hash of what's on screen, so unchanged content isn't re-sent
+#endif
 
 // --- Thermal Safety ---
 // Enforced locally regardless of whether the Mega is polling: the Nano cuts its own LED
@@ -152,28 +165,44 @@ void handleNeoPixel() {
   }
 }
 
-// Redraws the status OLED on a fixed interval rather than on every command -- the NeoPixel
-// already gives immediate per-command feedback, so this just needs to stay current, not
-// instantaneous, and a fixed interval keeps I2C traffic off the UART-servicing hot path.
-// No-op entirely if begin() never found a display (oledPresent stays false).
+#if OLED_ENABLED
+// Redraws the status OLED. display() pushes the whole 512-byte frame over I2C (~15ms, and
+// up to 25ms *per transaction* if the bus is faulty), during which loop() can't turn UV
+// LEDs off on time or answer the Mega -- exposures can be as short as ~30ms, so this must
+// never run while an LED is active. It also skips redraws when nothing on screen changed,
+// and permanently disables itself on any I2C timeout so a bad bus can't starve the UART.
 void updateOled() {
   if (!oledPresent) return;
+  if (ledActive[0] || ledActive[1] || ledActive[2] || ledActive[3]) return;
   unsigned long now = millis();
   if (now - lastOledUpdate < OLED_REFRESH_MS) return;
   lastOledUpdate = now;
 
-  bool firing = ledActive[0] || ledActive[1] || ledActive[2] || ledActive[3];
+  uint8_t state = thermalTripped ? 2 : 0;   // 0=READY, 2=HOT (FIRE is never drawn: see above)
+  uint16_t sig = ((uint16_t)state << 8) ^ ((uint16_t)currentTemps[0] << 4) ^ currentTemps[1];
+  if (sig == lastOledSig) return;
 
   oled.clearDisplay();
   oled.setTextColor(SSD1306_WHITE);
   oled.setCursor(0, 0);
   oled.setTextSize(2);
-  oled.println(thermalTripped ? "HOT!" : (firing ? "FIRE" : "READY"));
+  oled.println(state == 2 ? "HOT!" : "READY");
   oled.setTextSize(1);
   oled.print("T0:"); oled.print(currentTemps[0]); oled.print("C ");
   oled.print("T1:"); oled.print(currentTemps[1]); oled.println("C");
   oled.display();
+  lastOledSig = sig;
+
+#ifdef WIRE_HAS_TIMEOUT
+  if (Wire.getWireTimeoutFlag()) {
+    oledPresent = false;   // bus fault -- give up on the display for this power cycle
+    Wire.end();            // releases A4/A5 and the TWI pull-ups
+  }
+#endif
 }
+#else
+inline void updateOled() {}
+#endif
 
 void processCommand(String cmd) {
   cmd.trim(); 
@@ -284,13 +313,27 @@ void setup() {
   crTouch.attach(PIN_PROBE_SERVO);
   crTouch.write(90); // Stow on boot
 
-  // Optional accessory: if nothing acks on the I2C bus (no OLED wired), oledPresent stays
-  // false and updateOled() becomes a no-op -- boards without the display still run fine.
-  oledPresent = oled.begin(SSD1306_SWITCHCAPVCC, OLED_ADDR);
-  if (oledPresent) {
+#if OLED_ENABLED
+  // Optional accessory. Probe the address ourselves (with a short Wire timeout so a stuck
+  // bus can't hang setup() before the UART is serviced); only if it ACKs do we let the
+  // library allocate its frame buffer and take over. No display => Wire is shut back off.
+  Wire.begin();
+#ifdef WIRE_HAS_TIMEOUT
+  Wire.setWireTimeout(5000, true);
+#endif
+  Wire.beginTransmission(OLED_ADDR);
+  bool oledAcked = (Wire.endTransmission() == 0);
+#ifdef WIRE_HAS_TIMEOUT
+  if (Wire.getWireTimeoutFlag()) oledAcked = false;
+#endif
+  if (oledAcked && oled.begin(SSD1306_SWITCHCAPVCC, OLED_ADDR, true, false)) {
+    oledPresent = true;
     oled.clearDisplay();
     oled.display();
+  } else {
+    Wire.end();
   }
+#endif
 
   inBuffer.reserve(64);
   triggerNeo(C_BOOT, C_SUCC);

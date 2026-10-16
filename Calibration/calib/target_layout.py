@@ -101,11 +101,12 @@ def build_target(
     emax_s: float = 3.0,
     mm_per_pixel: float = 2.0,
     n_levels: int = 24,
-    repeats: int = 3,
-    patch_mm: float = 12.0,
-    fiducial_mm: float = 16.0,
-    dmax_swatch_mm: float = 30.0,
-    gap_mm: float = 4.0,
+    repeats: int = 2,
+    patch_mm: float = 8.0,
+    fiducial_mm: float = 8.0,
+    dmax_swatch_mm: float = 8.0,
+    gap_mm: float = 2.0,
+    cols: int | None = None,
     invert: bool = True,
     rng_seed: int | None = None,
 ) -> TargetLayout:
@@ -130,9 +131,13 @@ def build_target(
             f"{MAX_IMG_WIDTH}px ({MAX_IMG_WIDTH * mm_per_pixel:.0f}mm) once fiducial "
             f"margins are reserved -- reduce patch_mm or fiducial_mm"
         )
-    cols = max(1, available_width_px // patch_px)
+    max_cols = max(1, available_width_px // patch_px)
     total_patches = len(specs)
-    cols = min(cols, total_patches)
+    if cols is None:
+        # Roughly square grid: the sheet only needs to be as wide as the grid,
+        # not the firmware's full MAX_IMG_WIDTH, which wastes media and time.
+        cols = math.ceil(math.sqrt(total_patches))
+    cols = max(1, min(cols, max_cols, total_patches))
     rows_n = math.ceil(total_patches / cols)
 
     grid_width_px = cols * patch_px

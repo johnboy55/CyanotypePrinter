@@ -1,0 +1,36 @@
+# Python
+*.pyc
+*.pyo
+__pycache__/
+.pytest_cache/
+.venv/
+venv/
+*.egg-info/
+
+# Arduino build output
+build/
+*.hex
+*.elf
+*.bin
+*.eep
+*.map
+
+# Editors / IDEs
+.vscode/
+.idea/
+*.swp
+*~
+
+# OS
+Thumbs.db
+desktop.ini
+.DS_Store
+
+# Logs / temp / backups
+*.log
+*.tmp
+*.bak
+*.orig
+
+# Claude Code local settings
+.claude/settings.local.json

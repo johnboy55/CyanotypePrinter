@@ -47,7 +47,7 @@ Photo capture tips:
 **1. Generate a target:**
 
 ```
-python gen_target.py --emax 3.0 --mm-per-pixel 2.0 --patches 24 --repeats 3 \
+python gen_target.py --emax 3.0 --mm-per-pixel 2.0 --patches 24 --repeats 2 \
     --check-against-cfg ../SDCard/config/uv.cfg \
     --out-prefix vandyke_2026-09-04
 ```
@@ -88,7 +88,7 @@ it via `Calib > Load LUT`, same as any other calibration file.
 ## Design notes
 
 - Patch exposures are intentionally NOT a plain left-to-right ramp: each of
-  the ~24 exposure levels is repeated 3x at shuffled, non-adjacent positions
+  the ~24 exposure levels is repeated 2x at shuffled, non-adjacent positions
   on the sheet, so a fogging gradient or uneven tray development doesn't bias
   any one level. `analyze_target.py` combines repeats with outlier rejection.
 - Sampling is denser near the toe (low exposure) and shoulder (high exposure)

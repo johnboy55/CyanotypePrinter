@@ -6,8 +6,8 @@ print the BMP after loading the seed LUT on the printer (Calib > Load LUT),
 develop it, then hand the sidecar + a photo of the result to analyze_target.py.
 
 Example:
-    python gen_target.py --emax 3.0 --mm-per-pixel 2.0 --patches 24 --repeats 3 \\
-        --patch-mm 12 --invert --check-against-cfg ../SDCard/config/uv.cfg \\
+    python gen_target.py --emax 3.0 --mm-per-pixel 2.0 --patches 24 --repeats 2 \\
+        --patch-mm 8 --invert --check-against-cfg ../SDCard/config/uv.cfg \\
         --out-prefix vandyke_2026-09-04
 """
 from __future__ import annotations
@@ -65,10 +65,11 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--emax", type=float, default=3.0, help="max exposure in seconds (default 3.0, matches SDCard/calibrations/3sec.txt)")
     ap.add_argument("--mm-per-pixel", type=float, default=2.0, help="physical pixel pitch in mm (default 2.0, matches uv.cfg)")
     ap.add_argument("--patches", type=int, default=24, dest="n_levels", help="number of distinct exposure levels to sample (default 24)")
-    ap.add_argument("--repeats", type=int, default=3, help="repeats per exposure level, spread across the sheet (default 3)")
-    ap.add_argument("--patch-mm", type=float, default=12.0, help="side length of each patch in mm (default 12.0)")
-    ap.add_argument("--fiducial-mm", type=float, default=16.0, help="side length of each corner fiducial in mm (default 16.0)")
-    ap.add_argument("--dmax-swatch-mm", type=float, default=30.0, help="height of the early-DMAX strip at the top of the target (default 30.0)")
+    ap.add_argument("--repeats", type=int, default=2, help="repeats per exposure level, spread across the sheet (default 2)")
+    ap.add_argument("--patch-mm", type=float, default=8.0, help="side length of each patch in mm (default 8.0)")
+    ap.add_argument("--fiducial-mm", type=float, default=8.0, help="side length of each corner fiducial in mm (default 8.0)")
+    ap.add_argument("--dmax-swatch-mm", type=float, default=8.0, help="height of the early-DMAX strip at the top of the target (default 8.0)")
+    ap.add_argument("--cols", type=int, default=None, help="patch columns (default: roughly square grid)")
     ap.add_argument("--invert", dest="invert", action="store_true", default=True, help="assume CFG.invertImage=1 (default, matches uv.cfg)")
     ap.add_argument("--no-invert", dest="invert", action="store_false", help="assume CFG.invertImage=0")
     ap.add_argument("--check-against-cfg", metavar="PATH", help="warn if --mm-per-pixel/--invert mismatch this uv.cfg-style file")
@@ -88,6 +89,7 @@ def main(argv: list[str] | None = None) -> int:
             patch_mm=args.patch_mm,
             fiducial_mm=args.fiducial_mm,
             dmax_swatch_mm=args.dmax_swatch_mm,
+            cols=args.cols,
             invert=args.invert,
             rng_seed=args.rng_seed,
         )

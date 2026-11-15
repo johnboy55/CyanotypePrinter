@@ -72,6 +72,20 @@ void drawStatusRow(const bool ledOn[4], const String &rightText) {
   display.setCursor(rx, y); display.print(rightText); display.sendBuffer();
 }
 
+// Draws the printhead LED temp (from lastLedTemp) in the top-right corner of the header
+// bar, unlabeled (just "NNC") so it doesn't compete with the row/slice/column status text
+// below it. Buffer-only, like drawStatusRow's LED boxes -- caller is expected to follow up
+// with a sendBuffer() (usually drawStatusRow's own, so both land in the same I2C push).
+void drawTempReadout(int tempC) {
+  char buf[6];
+  if (tempC >= 0) snprintf(buf, sizeof(buf), "%dC", tempC);
+  else snprintf(buf, sizeof(buf), "--");
+  uint16_t bw = display.getStrWidth(buf);
+  int x = 128 - (int)bw - 1;
+  display.setDrawColor(0); display.drawBox(x, 0, (int)bw + 1, 9); display.setDrawColor(1);
+  display.setCursor(x, 0); display.print(buf);
+}
+
 // Human-readable software-tracked carriage position, e.g. "X:12.3 Y:45.6". Deliberately
 // built with String(float,1) rather than snprintf/displayPrintf's %f: this build isn't
 // linked with -lprintf_flt (no such flag in platformio.ini), so avr-libc's vsnprintf
@@ -80,6 +94,15 @@ void drawStatusRow(const bool ledOn[4], const String &rightText) {
 // so it's the safe way to get a float onto the OLED here.
 String xyPositionString() {
   return String(F("X:")) + String(currentSteps / STEPS_PER_MM_X, 1) + F(" Y:") + String(currentStepsY / STEPS_PER_MM_Y, 1);
+}
+
+// Records an "IP:..." broadcast from the ESP32/ESP8266 into the fixed lastEspIp buffer.
+// Shared by menuMain()'s idle-loop drain and menuESP32Control()'s protocol parser, both of
+// which see these broadcasts -- the ESP resends its IP periodically regardless of which
+// menu the Mega is currently sitting in.
+void setLastEspIp(const String &ip) {
+  strncpy(lastEspIp, ip.c_str(), sizeof(lastEspIp) - 1);
+  lastEspIp[sizeof(lastEspIp) - 1] = '\0';
 }
 
 // Walks folder once, invoking visit(name, matchIndex) for each entry matching extLower.
@@ -297,7 +320,6 @@ void menuZCtrl() {
 
 void menuZCalib() {
   while (true) {
-    if (checkEStop()) return;
     oledHeader(F("Z Calibration"));
     display.setCursor(0, 18); display.print(F("> Home Z"));
     display.setCursor(0, 46); display.print(F("[Back] to exit"));
@@ -325,7 +347,6 @@ void menuZCalib() {
 // it stop short on one axis?) without having to run a whole print first.
 void menuHomeXY() {
   homeXY();
-  if (eStopLatched) return; // loop() will show the e-stop screen instead of "Done".
   cancelRequested = false;
   oledHeader(F("Home X/Y"));
   display.setCursor(0, 20); display.print(F("Done"));
@@ -339,7 +360,6 @@ void menuMotor() {
   const int ITEMS = 5;
 
   while (true) {
-    if (checkEStop()) return;
     oledHeader(F("Motor Control"));
     display.setCursor(0, 14); display.print(sel==0?F("> "):F("  ")); display.print(F("X Move"));
     display.setCursor(0, 24); display.print(sel==1?F("> "):F("  ")); display.print(F("Y Move"));
@@ -363,60 +383,66 @@ void menuMotor() {
 }
 
 void menuYCtrl() {
-  float baseMM = 5.0f;
-  float trimR = 0.0f;
-  const float INC_BASE = 5.0f;
-  const float INC_TRIM = 0.5f;
-  bool redraw = true;
+  const float INC_MM = 5.0f;
+  float distanceMM = 5.0f;
+  bool exitScreen = false;
 
-  while (true) {
-    if (redraw) {
-      oledHeader(F("Y Ctrl (dist)"));
-      display.setCursor(0, 16); display.print(F("Both: ")); display.print(baseMM,1); display.print(F(" mm"));
-      display.setCursor(0, 28); display.print(F("Trim R: ")); display.print(trimR,1); display.print(F(" mm"));
-      display.setCursor(0, 44); display.print(F("[+] +5mm / [-] -5mm"));
-      display.setCursor(0, 56); display.print(F("[Enter] Dir / [Back] exit"));
-      display.sendBuffer();
-      redraw = false;
+  while (!exitScreen) {
+    bool redraw = true;
+    while (true) {
+      if (redraw) {
+        oledHeader(F("Y Ctrl"));
+        display.setCursor(0, 18); display.print(F("Distance: "));
+        display.print(distanceMM, 1); display.print(F(" mm"));
+        display.setCursor(0, 34); display.print(F("[+/-] \xC2\xB1 5mm"));
+        display.setCursor(0, 46); display.print(F("[Enter] Direction   [Back] exit"));
+        display.sendBuffer();
+        redraw = false;
+      }
+
+      if (readButton(btnPlus))  { distanceMM += INC_MM; if (distanceMM > 10000.0f) distanceMM = 10000.0f; redraw = true; }
+      if (readButton(btnMinus)) { distanceMM -= INC_MM; if (distanceMM < 0.0f) distanceMM = 0.0f; redraw = true; }
+      if (readButton(btnBack))  { exitScreen = true; break; }
+      if (readButton(btnEnter)) break;
+      delay(10);
     }
+    if (exitScreen) break;
 
-    if (readButton(btnPlus))  { baseMM += INC_BASE; if (baseMM > 10000.0f) baseMM = 10000.0f; redraw = true; }
-    if (readButton(btnMinus)) { baseMM -= INC_BASE; if (baseMM < 0.0f) baseMM = 0.0f; redraw = true; }
-    if (buttonHeld(btnPlus)) { unsigned long t0 = millis(); while (buttonHeld(btnPlus)) { delay(5); if (millis()-t0>600) { trimR += INC_TRIM; redraw = true; break; } } }
-    if (readButton(btnBack))  return;
-    if (readButton(btnEnter)) break;
-    delay(10);
-  }
+    bool forward = true;
+    redraw = true;
+    while (true) {
+      if (redraw) {
+        oledHeader(F("Y Direction"));
+        display.setCursor(0, 18); display.print(F("Move: "));
+        display.print(forward ? F("Forward") : F("Backward"));
+        display.setCursor(0, 34); display.print(F("[+/-] Toggle"));
+        display.setCursor(0, 46); display.print(F("[Enter] Go      [Back] exit"));
+        display.sendBuffer();
+        redraw = false;
+      }
 
-  bool forward = true;
-  redraw = true;
-  while (true) {
-    if (redraw) {
-      oledHeader(F("Y Direction"));
-      display.setCursor(0, 16); display.print(F("Move: ")); display.print(forward ? "Forward" : "Backward");
-      display.setCursor(0, 28); display.print(F("Both ")); display.print(baseMM,1); display.print(F("mm"));
-      display.setCursor(0, 38); display.print(F("TrimR ")); display.print(trimR,1); display.print(F("mm"));
-      display.setCursor(0, 56); display.print(F("[+/-] Toggle [Ent] Go [Back] x"));
-      display.sendBuffer();
-      redraw = false;
+      if (readButton(btnPlus) || readButton(btnMinus)) { forward = !forward; redraw = true; }
+      if (readButton(btnEnter)) {
+        if (distanceMM > 0) {
+          digitalWrite(PIN_EN, LOW);
+          bool none[4] = {false,false,false,false};
+          String rt = String(F("Y ")) + (forward ? F("+") : F("-")) + String(distanceMM,1) + F("mm");
+          drawStatusRow(none, rt);
+          yMoveMM(distanceMM, forward);
+          digitalWrite(PIN_EN, HIGH);
+          cancelRequested = false;
+        }
+        oledHeader(F("Y Ctrl"));
+        display.setCursor(0, 30); display.print(F("Done"));
+        bool none2[4] = {false,false,false,false};
+        drawStatusRow(none2, F("Ready"));
+        display.sendBuffer();
+        delay(800);
+        break;
+      }
+      if (readButton(btnBack)) { exitScreen = true; break; }
+      delay(10);
     }
-
-    if (readButton(btnPlus) || readButton(btnMinus)) { forward = !forward; redraw = true; }
-    if (readButton(btnEnter)) {
-      bool none[4] = {false,false,false,false};
-      String rt = String(F("Y ")) + (forward?F("+"):F("-")) + String(baseMM,1) + F(" / R+") + String(trimR,1);
-      drawStatusRow(none, rt);
-      yMoveSkewMM(baseMM, trimR, forward);
-      cancelRequested = false;
-      oledHeader(F("Y Ctrl"));
-      display.setCursor(0, 30); display.print(F("Done"));
-      drawStatusRow(none, F("Ready"));
-      display.sendBuffer();
-      delay(900);
-      return;
-    }
-    if (readButton(btnBack)) return;
-    delay(10);
   }
 }
 int readDirEntries(const String &path, Entry out[], int maxOut) {
@@ -538,7 +564,6 @@ void menuOffset() {
   int sub = 0;
   const int SUB_ITEMS = 2;
   while (true) {
-    if (checkEStop()) return;
     oledHeader(F("Offset"));
     display.setCursor(0, 12); display.print(String(F("Cur: ")) + xyPositionString());
     display.setCursor(0, 22);
@@ -577,7 +602,6 @@ void menuMotionSpeed() {
   int sel = 0;
 
   while (true) {
-    if (checkEStop()) return;
     oledHeader(F("Motion Speed"));
     for (int i = 0; i < FIELDS; i++) {
       display.setCursor(0, 12 + i * 10);
@@ -636,7 +660,6 @@ void menuViewLUT() {
   }
   display.sendBuffer();
   while (true) {
-    if (checkEStop()) return;
     if (readButton(btnBack) || readButton(btnEnter)) return;
     delay(10);
   }
@@ -646,7 +669,6 @@ void menuCalib() {
   int sub = 0;
   const int SUB_ITEMS = 6;
   while (true) {
-    if (checkEStop()) return;
     oledHeader(F("Calibration"));
     // 6 items in the same 14..54 vertical band the 5-item version used (8px pitch instead
     // of 10px -- still fits above the footer-free bottom edge at y=54+10=64).
@@ -669,7 +691,6 @@ void menuCalib() {
       if (sub == 0) {
         int step = 0;
         while (true) {
-          if (checkEStop()) return;
           oledHeader(F("Calib Fire"));
           display.setCursor(0, 20); displayPrintf(display, F("Fire LED %d"), step + 1);
           display.setCursor(0, 50); display.print(F("[+/-]Sel [Ent]Fire [Back]x"));
@@ -717,8 +738,6 @@ void testSerialRelay() {
 
   // Tight relay loop
   while (true) {
-    if (checkEStop()) return;
-
     // PC -> Mega -> Nano
     if (Serial.available()) {
       PRINTHEAD_SERIAL.write(Serial.read());
@@ -734,7 +753,6 @@ void testSerialRelay() {
 void testFireLEDs() { 
   int ms = 500;
   while (true) {
-    if (checkEStop()) return;
     oledHeader(F("Test LEDs"));
     display.setCursor(0, 20); displayPrintf(display, F("Dur: %d ms"), ms);
     display.setCursor(0, 50); display.print(F("[+/-]Time [Ent]Fire [Back]x")); display.sendBuffer();
@@ -758,7 +776,6 @@ void testOffset() {
   long savedX = currentSteps, savedY = currentStepsY;
 
   moveToOffset();
-  if (eStopLatched) return;
 
   if (!cancelRequested) {
     oledHeader(F("Test Offset"));
@@ -770,7 +787,6 @@ void testOffset() {
   cancelRequested = false;
 
   moveToXYSteps(savedX, savedY, F("Test Offset"), F("Returning..."));
-  if (eStopLatched) return;
   oledHeader(F("Test Offset"));
   display.setCursor(0, 20); display.print(F("Done"));
   display.sendBuffer();
@@ -781,7 +797,6 @@ void menuTest() {
   int sel = 0;
   const int ITEMS = 3;
   while (true) {
-    if (checkEStop()) return;
     oledHeader(F("Test Menu"));
     display.setCursor(0, 16); display.print(sel==0?F("> "):F("  ")); display.print(F("Fire LEDs"));
     display.setCursor(0, 26); display.print(sel==1?F("> "):F("  ")); display.print(F("Serial Relay"));
@@ -822,7 +837,7 @@ void measureMatrix() {
 
   for (int i = 0; i < MESH_SIZE; i++) {
     for (int j = 0; j < MESH_SIZE; j++) {
-      if (checkEStop() || checkCancel()) { cancelRequested = false; return; }
+      if (checkCancel()) { cancelRequested = false; return; }
       int y_idx = (i % 2 == 0) ? j : (MESH_SIZE - 1 - j);
       moveToPixel((i * spacing_x) / MM_PER_PIXEL);
       yMoveMM(abs((y_idx * spacing_y) - (currentStepsY/STEPS_PER_MM_Y)), (y_idx * spacing_y) > (currentStepsY/STEPS_PER_MM_Y));
@@ -865,12 +880,12 @@ void loadMatrixFile() {
 void menuUtilities() {
   int sel = 0; const int ITEMS = 4;
   while (true) {
-    if (checkEStop()) return;
     oledHeader(F("Utilities"));
     display.setCursor(0, 16); display.print(sel==0?F("> "):F("  ")); display.print(F("Zero Pos Here"));
     display.setCursor(0, 26); display.print(sel==1?F("> "):F("  ")); display.print(F("Reload Config"));
     display.setCursor(0, 36); display.print(sel==2?F("> "):F("  ")); display.print(F("Measure Bed Mesh"));
     display.setCursor(0, 46); display.print(sel==3?F("> "):F("  ")); display.print(F("Load Bed Mesh"));
+    display.setCursor(0, 58); display.print(F("ESP IP: ")); display.print(lastEspIp);
     display.sendBuffer();
     if (readButton(btnPlus))  sel = (sel + 1) % ITEMS;
     if (readButton(btnMinus)) sel = (sel - 1 + ITEMS) % ITEMS;
@@ -926,7 +941,7 @@ static void drawImagePreview(int w, int h, const String &hexData, int boxX, int 
 // clears the gantry so paper can go on, seats it with vacuum once confirmed, prints,
 // and parks the carriage clear of the bed so the print can be grabbed (Z is never
 // touched automatically -- only by manual operator adjustment). Returns to the idle
-// online screen on cancel/e-stop too.
+// online screen on cancel too.
 static void runIncomingPrint(int w, int h, const String &hexData) {
   buzzPrintIncoming();
   oledHeader(F("Print Incoming"));
@@ -937,7 +952,6 @@ static void runIncomingPrint(int w, int h, const String &hexData) {
   display.setCursor(0, 54); display.print(F("[Ent]Print [Back]x"));
   display.sendBuffer();
   while (true) {
-    if (checkEStop()) return;
     if (readButton(btnEnter)) break;
     if (readButton(btnBack)) return;
     delay(10);
@@ -953,7 +967,6 @@ static void runIncomingPrint(int w, int h, const String &hexData) {
   bool fan1On = false, fan2On = false;
   bool redraw = true;
   while (true) {
-    if (checkEStop()) { setVacRelay(PIN_VAC_RELAY_1, false); setVacRelay(PIN_VAC_RELAY_2, false); return; }
     if (redraw) {
       oledHeader(F("Place Paper"));
       display.setCursor(0, 14); display.print(F("Fan 1: ")); display.print(fan1On ? "ON" : "off");
@@ -995,7 +1008,6 @@ static void runIncomingPrint(int w, int h, const String &hexData) {
 
   setVacRelay(PIN_VAC_RELAY_1, false);
   setVacRelay(PIN_VAC_RELAY_2, false);
-  if (eStopLatched) return; // Let loop() show the e-stop screen instead of homing.
 
   bool completedOk = !cancelRequested;
   cancelRequested = false;
@@ -1028,8 +1040,6 @@ void menuESP32Control() {
   ESP_SERIAL.println(F("STATE:OFFLINE")); // In case a previous session left the ESP32 thinking it's online.
 
   while (true) {
-    if (checkEStop()) { if (espOnline) ESP_SERIAL.println(F("STATE:OFFLINE")); return; }
-
     // Drain lines from the ESP32: periodic "IP:..." broadcasts, and (while online) a
     // stop-and-wait chunked transfer -- PSTART:w,h,len announces one, then <=32 hex
     // chars at a time as "D:<chunk>", each acked with "OK\n"/"ERR\n" before the sender's
@@ -1043,6 +1053,7 @@ void menuESP32Control() {
         inLen = 0;
         if (line.startsWith(F("IP:"))) {
           ip = line.substring(3);
+          setLastEspIp(ip);
           redraw = true;
         } else if (espOnline && line.startsWith(F("PSTART:"))) {
           int c1 = line.indexOf(','); int c2 = line.indexOf(',', c1 + 1);
@@ -1079,7 +1090,6 @@ void menuESP32Control() {
             // all) or fully printed, and either way the ESP32 needs telling so a web UI
             // that optimistically marked itself "printing" on dispatch doesn't get stuck.
             reportEspIdleState();
-            if (eStopLatched) return; // Let loop() show the e-stop screen instead of "Waiting...".
           } else {
             ESP_SERIAL.println(F("ERR"));
           }
@@ -1121,33 +1131,6 @@ void menuESP32Control() {
 
 enum MainMenu { MM_CALIB = 0, MM_PRINT = 1, MM_TEST = 2, MM_MOTOR = 3, MM_BROWSER = 4, MM_UTILS = 5, MM_ESP32 = 6 };
 
-// Shown by loop() instead of the normal menu whenever eStopLatched is true. Requires a
-// deliberate hold (not just a tap) to clear, and re-checks the Nano before actually
-// clearing so a still-engaged switch or still-hot printhead can't be waved away.
-void renderEmergencyStopScreen() {
-  static unsigned long holdStart = 0;
-
-  oledHeader(F("EMERGENCY STOP"));
-  display.setCursor(0, 16); display.print(F("Cause: ")); display.print(eStopCause);
-  display.setCursor(0, 32); display.print(F("Inspect machine, then"));
-  display.setCursor(0, 42); display.print(F("hold [Enter] to clear"));
-
-  if (buttonHeld(btnEnter)) {
-    if (holdStart == 0) holdStart = millis();
-    if (millis() - holdStart > 2000) {
-      if (queryNanoLimitMask() == 0) {
-        clearEmergencyStop();
-      } else {
-        display.setCursor(0, 54); display.print(F("Still triggered!"));
-      }
-      holdStart = 0;
-    }
-  } else {
-    holdStart = 0;
-  }
-  display.sendBuffer();
-}
-
 void menuMain() {
   static int mainSel = 0;
   static unsigned long lastPing = 0;
@@ -1159,13 +1142,26 @@ void menuMain() {
     lastPing = millis();
   }
 
+  // Idle heartbeat for the ESP32/ESP8266 status page: this only runs at the
+  // top-level main menu (no submenu, no print active), so it can't race the
+  // print loop's own PRINTHEAD_SERIAL/ESP_SERIAL traffic. Keeps the status
+  // page's temp reading and Idle state fresh even if nobody ever opens the
+  // ESP32 Control menu or starts a print.
+  static unsigned long lastEspHeartbeat = 0;
+  if (millis() - lastEspHeartbeat > 2000) {
+    reportLedTempToEsp();
+    ESP_SERIAL.println(F("STATE:OFFLINE")); // Idle: main menu implies no print in progress
+    lastEspHeartbeat = millis();
+  }
+
   while (PRINTHEAD_SERIAL.available()) {
     static String rBuf = "";
     char c = PRINTHEAD_SERIAL.read();
     if (c == '\n') {
       rBuf.trim();
       if (rBuf.startsWith(F("S:"))) {
-        nanoStatus = (rBuf == F("S:0")) ? F("Ready") : F("Busy");
+        // Nano's reply is "S:<mask>,<temp0>" -- Ready iff mask is 0, regardless of temp.
+        nanoStatus = (rBuf == F("S:0") || rBuf.startsWith(F("S:0,"))) ? F("Ready") : F("Busy");
         lastResp = millis();
       }
       rBuf = "";
@@ -1176,6 +1172,22 @@ void menuMain() {
 
   if (millis() - lastResp > 2000) {
     nanoStatus = F("Offline");
+  }
+
+  // Drain the ESP32/ESP8266's periodic "IP:..." broadcasts even when nobody's opened the
+  // ESP32 Control menu -- it resends its IP on a timer regardless of Mega menu state, so
+  // without this the bytes would just sit unread in Serial3's RX buffer until someone
+  // finally visits that menu.
+  while (ESP_SERIAL.available()) {
+    static String eBuf = "";
+    char c = ESP_SERIAL.read();
+    if (c == '\n') {
+      eBuf.trim();
+      if (eBuf.startsWith(F("IP:"))) setLastEspIp(eBuf.substring(3));
+      eBuf = "";
+    } else {
+      eBuf += c;
+    }
   }
 
   oledHeader(F("Main Menu"));

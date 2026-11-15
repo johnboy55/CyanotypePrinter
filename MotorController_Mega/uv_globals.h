@@ -4,14 +4,12 @@
 // Must be defined before Arduino.h/HardwareSerial.h are first pulled in (this header is
 // that first touchpoint for every .cpp in the sketch). Default AVR RX buffer is only 64
 // bytes with no flow control, giving a little headroom against a blocking wait elsewhere
-// (e.g. queryNanoLimitMask's poll of the Nano) stalling ESP_SERIAL reads.
+// stalling ESP_SERIAL reads.
 // IMPORTANT: keep this <=256. Past 256, HardwareSerial.h widens its ring-buffer index
 // from uint8_t to uint16_t -- but only on AVR cores new enough to have that adaptive
 // typedef. On an older core, a >256 buffer with 8-bit indices wraps at 256 while the
 // array is actually larger, desyncing the ring buffer and losing *more* data than the
-// default, not less. This is real headroom (2x default) without touching that boundary;
-// the actual fix for large payloads is not blocking ESP_SERIAL reads for so long (see
-// queryNanoLimitMask's timeout), not a bigger buffer.
+// default, not less. This is real headroom (2x default) without touching that boundary.
 #define SERIAL_RX_BUFFER_SIZE 128
 
 #include <Arduino.h>
@@ -21,7 +19,6 @@
 #include <U8g2lib.h>
 #include <stdarg.h>
 #include <stdio.h>
-#include <PinChangeInterrupt.h>
 #include <AccelStepper.h>
 #include "uv_types.h"
 
@@ -30,6 +27,54 @@
 // comes out mirrored/garbled on your specific panel, try the NONAME2 variant instead --
 // SSD1309 clone boards commonly need one or the other depending on their init sequence.
 typedef U8G2_SSD1309_128X64_NONAME0_F_HW_I2C OledDisplay;
+
+// AccelStepper's default DRIVER stepping (step1()/setOutputPins()) calls the generic
+// digitalWrite() three times per step -- on AVR that's a pin-to-port/bitmask lookup via
+// pgm_read_byte each time (~50-60 clock cycles), not a direct register write. Driving two
+// Y motors from one polling loop means paying that cost twice per loop pass.
+// setOutputPins() is declared virtual specifically so subclasses can replace it; this
+// override caches each pin's port register/bitmask once at construction and does a plain
+// read-modify-write (~2-4 cycles) on every step instead.
+class FastDriverStepper : public AccelStepper {
+public:
+  FastDriverStepper(uint8_t stepPin, uint8_t dirPin)
+    : AccelStepper(AccelStepper::DRIVER, stepPin, dirPin),
+      _stepPort(portOutputRegister(digitalPinToPort(stepPin))),
+      _stepBit(digitalPinToBitMask(stepPin)),
+      _dirPort(portOutputRegister(digitalPinToPort(dirPin))),
+      _dirBit(digitalPinToBitMask(dirPin)) {}
+
+  // For an axis that's mechanically ganged to another stepper and always takes the same
+  // steps at the same moments (e.g. the Y-axis's second lead screw motor): pulses the
+  // step pin directly instead of running this object's own move()/run() state machine.
+  // AccelStepper's per-step computeNewSpeed() does floating-point division to update the
+  // acceleration ramp -- on an AVR with no hardware FPU that's real, measured cost, and
+  // running it twice (once per Y motor) for two motors that always move identically is
+  // pure waste. Call setMirrorDirection() once before the move, then mirrorStep() once
+  // per step the real (moving) stepper takes.
+  void setMirrorDirection(bool forward) {
+    if (forward) *_dirPort |= _dirBit; else *_dirPort &= ~_dirBit;
+  }
+  void mirrorStep(unsigned int pulseWidthUs) {
+    *_stepPort |= _stepBit;
+    delayMicroseconds(pulseWidthUs);
+    *_stepPort &= ~_stepBit;
+  }
+
+protected:
+  // bit0 of mask = _pin[0] (step), bit1 = _pin[1] (dir) -- the same convention the base
+  // class's own step1() already assumes when it calls this.
+  void setOutputPins(uint8_t mask) override {
+    if (mask & 0x1) *_stepPort |= _stepBit; else *_stepPort &= ~_stepBit;
+    if (mask & 0x2) *_dirPort  |= _dirBit;  else *_dirPort  &= ~_dirBit;
+  }
+
+private:
+  volatile uint8_t *_stepPort;
+  uint8_t _stepBit;
+  volatile uint8_t *_dirPort;
+  uint8_t _dirBit;
+};
 
 #define FW_VERSION "UV Controller v2.2.0"
 
@@ -47,9 +92,6 @@ extern const int PIN_SD_CS;
 extern const int PIN_STEP, PIN_DIR, PIN_EN;
 extern const int PIN_YL_STEP, PIN_YR_STEP, PIN_Y_DIR, PIN_YR_DIR;
 extern const int PIN_Z_STEP, PIN_Z_DIR;
-// Single shared interrupt pin driven by the Nano's PIN_ESTOP_OUT: goes LOW when the
-// Nano's Z limit, Y limit, or thermal cutoff fires (OR'd together on the Nano side).
-extern const int PIN_NANO_ESTOP;
 extern const int PIN_BUZZER;
 // Spare pins on the bare header, immediately after btnBack (29): 30-37.
 // TODO confirm these against actual wiring before relying on them.
@@ -86,9 +128,9 @@ extern const float PAPER_LOAD_Y_MM;
 
 // X/Y motion. stepN()/yStepPair() drive these via .move()+.run(); Z stays bit-banged
 // (see moveZSteps/homeZ/probeZ in uv_print.cpp) -- only X/Y needed the acceleration ramp.
-extern AccelStepper stepperX;
-extern AccelStepper stepperYL;
-extern AccelStepper stepperYR;
+extern FastDriverStepper stepperX;
+extern FastDriverStepper stepperYL;
+extern FastDriverStepper stepperYR;
 // Applies CFG.maxSpeed{X,Y}mm/CFG.accel{X,Y}mm (in mm/s, mm/s^2) to the three steppers
 // above. Called once from setup() and again from applyConfig() whenever the SD config
 // reloads or the new OLED motion-speed menu saves a change.
@@ -106,16 +148,24 @@ extern float z_mesh[3][3];
 extern bool mesh_active;
 extern const float MESH_MAX_X, MESH_MAX_Y;
 
-extern volatile bool emergencyStopTriggered; // Raw ISR flag; classified/consumed by handleEmergencyStop()
-extern volatile bool zHomingActive;          // True while a Z-contact touch is expected (homing/probing)
-extern bool eStopLatched;                    // True once a genuine e-stop is confirmed; requires operator clear
-extern String eStopCause;                    // Human-readable cause of the current latch, e.g. "Z", "Y", "OVERTEMP"
 extern bool cancelRequested;                 // Operator hit Back mid-move/print; abort the current operation only
 // Whether the attendant has put the printer "online" from the ESP32-mode menu. Tracked
 // globally (not just local to menuESP32Control) so the print engine -- which also runs
 // for plain SD-card prints, entirely outside that menu -- knows what state to report
 // back to the ESP32 once a print finishes: PRINTING always reverts to this.
 extern bool espOnline;
+// Last printhead LED temp (Celsius) read back from the Nano, via either queryNanoLedTemp()/
+// reportLedTempToEsp() (standalone T query) or waitForPrinthead() (piggybacked on the S
+// reply that confirms firing is done); -1 means no reading yet (or the Nano hasn't
+// responded). Kept globally so the OLED print screen (drawTempReadout) can show the
+// latest value without re-querying the Nano itself.
+extern int lastLedTemp;
+// Last IP address the ESP32/ESP8266 broadcast over ESP_SERIAL ("IP:..."), e.g.
+// "192.168.4.1". Fixed buffer, not a String -- updated from menuMain()'s idle loop and
+// menuESP32Control()'s protocol parser, both of which favor fixed buffers over String on
+// the Mega's small heap. "--" until the first broadcast is seen. Long enough for a full
+// dotted-quad ("255.255.255.255" = 15 chars) plus the terminator.
+extern char lastEspIp[16];
 extern float LUT16[16];
 extern float LED_SCALE[4];
 
@@ -126,8 +176,6 @@ extern int ROW_FOR_LED[4];
 // Utility functions
 void serialPrintf(const char *fmt, ...);
 long lround_double(double x);
-void handleEmergencyStop();
-void contactInterruptHandler();
 void buzzReady();
 void buzzPrintIncoming(); // Attendant alert: a validated print arrived, go seat paper
 void buzzPrintSuccess();  // Print finished successfully

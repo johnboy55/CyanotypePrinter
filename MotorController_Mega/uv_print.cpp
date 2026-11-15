@@ -67,7 +67,7 @@ void waitForPrinthead() {
   String lastResponse = F("(none)");
   bool isBusy = true;
   while (isBusy) {
-    if (checkEStop() || checkCancel()) return;
+    if (checkCancel()) return;
     if (millis() - waitStart > timeoutMs) {
       Serial.print(F("[PRINTHEAD] no S:0 ack after "));
       Serial.print(millis() - waitStart);
@@ -87,7 +87,15 @@ void waitForPrinthead() {
       String response = PRINTHEAD_SERIAL.readStringUntil('\n');
       response.trim();
       lastResponse = response;
-      if (response == F("S:0")) isBusy = false;
+      // Nano's S reply is "S:<mask>,<temp0>" -- once mask is 0 (done firing), grab the
+      // temp it piggybacked on this same reply instead of a separate T round-trip. A bare
+      // "S:0" (older Nano firmware, no temp) still counts as done so a Mega/Nano flashed
+      // out of step doesn't stall every pixel until the timeout.
+      if (response == F("S:0") || response.startsWith(F("S:0,"))) {
+        isBusy = false;
+        int comma = response.indexOf(',');
+        if (comma > 0) reportLedTemp(response.substring(comma + 1).toInt());
+      }
     }
   }
 }
@@ -95,12 +103,7 @@ void waitForPrinthead() {
 bool isProbeTriggered() {
   PRINTHEAD_SERIAL.print(F("P\n"));
   unsigned long timeout = millis();
-  while (!PRINTHEAD_SERIAL.available() && millis() - timeout < 100) {
-    // Don't classify/query the Nano from inside this wait -- that would overlap two
-    // outstanding requests on the same UART. Just bail out; the caller's stepping loop
-    // calls checkEStop() on its next iteration, once this exchange has finished.
-    if (emergencyStopTriggered) break;
-  }
+  while (!PRINTHEAD_SERIAL.available() && millis() - timeout < 100) {}
   if (PRINTHEAD_SERIAL.available()) {
     String response = PRINTHEAD_SERIAL.readStringUntil('\n'); response.trim();
     if (response == F("P:1")) return true;
@@ -114,75 +117,47 @@ bool isZMaxSwitchPressed() {
   return isProbeTriggered();
 }
 
-// ---------- Emergency Stop ----------
-// emergencyStopTriggered (volatile, ISR-set) is a raw, unclassified signal: the Nano ORs
-// its Z limit, Y limit, and thermal cutoff onto one line, so a rising/falling edge alone
-// doesn't say which one fired, or whether it was an *expected* touch (e.g. Z homing).
-// eStopLatched is the classified, operator-visible result: once true, all motion stops
-// until clearEmergencyStop() is called from the menu.
-static bool eStopAnnounced = false;
-
-int queryNanoLimitMask() {
-  PRINTHEAD_SERIAL.print(F("L\n"));
+// Queries the Nano's T[0] (printhead LED temp, the one with the thermal-cutoff
+// trip) for relaying to the ESP32/ESP8266 status page. Drains stale bytes first,
+// same as waitForPrinthead(), so a reply that missed an earlier window can't be
+// mistaken for the answer to this query.
+int queryNanoLedTemp() {
+  while (PRINTHEAD_SERIAL.available()) PRINTHEAD_SERIAL.read();
+  PRINTHEAD_SERIAL.print(F("T\n"));
   unsigned long timeout = millis();
   while (!PRINTHEAD_SERIAL.available() && millis() - timeout < 100) {}
   if (PRINTHEAD_SERIAL.available()) {
     String resp = PRINTHEAD_SERIAL.readStringUntil('\n'); resp.trim();
-    if (resp.startsWith(F("L:"))) return resp.substring(2).toInt();
+    if (resp.startsWith(F("T:"))) {
+      int comma = resp.indexOf(',');
+      return (comma > 0 ? resp.substring(2, comma) : resp.substring(2)).toInt();
+    }
   }
-  return -1; // Nano not responding -- never assume this means "safe".
+  return -1; // Nano not responding
+}
+
+// Records a known-good printhead LED temp reading in lastLedTemp (for the OLED's
+// drawTempReadout) and forwards it to the ESP32/ESP8266 status page. Shared by
+// reportLedTempToEsp() (its own T round-trip) and waitForPrinthead() (temp piggybacked
+// on the S reply that already confirmed the Nano is done firing).
+void reportLedTemp(int t) {
+  lastLedTemp = t;
+  ESP_SERIAL.print(F("TEMP:")); ESP_SERIAL.println(t);
+}
+
+// Forwards the printhead LED temp to the ESP32/ESP8266 status page and records it in
+// lastLedTemp for the OLED (drawTempReadout). No-op if the Nano didn't respond -- both
+// the status page and the OLED just keep showing their last known reading rather than
+// getting a bogus one.
+void reportLedTempToEsp() {
+  int t = queryNanoLedTemp();
+  if (t >= 0) reportLedTemp(t);
 }
 
 // Tells the ESP32 the printer's idle state (never call this while actually PRINTING --
-// that's sent separately). Reports OFFLINE even if espOnline is still true whenever an
-// e-stop is latched, since the machine can't accept a new job until it's cleared.
+// that's sent separately).
 void reportEspIdleState() {
-  ESP_SERIAL.println((espOnline && !eStopLatched) ? F("STATE:ONLINE") : F("STATE:OFFLINE"));
-}
-
-static String describeEStopCause(int mask) {
-  if (mask < 0) return F("NANO OFFLINE");
-  if (mask == 0) return F("UNKNOWN");
-  String s;
-  if (mask & 0x1) s += F("Z ");
-  if (mask & 0x2) s += F("Y ");
-  if (mask & 0x4) s += F("OVERTEMP ");
-  return s;
-}
-
-void handleEmergencyStop() {
-  digitalWrite(PIN_EN, HIGH); // Always keep drivers disabled while a stop condition is live.
-
-  if (eStopLatched) return; // Already latched; callers check eStopLatched/checkEStop() to abort.
-
-  int mask = queryNanoLimitMask();
-  bool zOnly = (mask == 0x1);
-  bool expectedTouch = zHomingActive && zOnly;
-
-  emergencyStopTriggered = false; // Consumed either way; classification below decides the outcome.
-
-  if (expectedTouch) return; // Intentional Z contact during homing/probing -- not a real stop.
-
-  eStopLatched = true;
-  eStopCause = describeEStopCause(mask);
-
-  if (!eStopAnnounced) {
-    eStopAnnounced = true;
-    Serial.print(F("E-STOP LATCHED: ")); Serial.println(eStopCause);
-  }
-}
-
-bool checkEStop() {
-  if (emergencyStopTriggered) handleEmergencyStop();
-  return eStopLatched;
-}
-
-void clearEmergencyStop() {
-  eStopLatched = false;
-  eStopAnnounced = false;
-  eStopCause = "";
-  emergencyStopTriggered = false;
-  digitalWrite(PIN_EN, HIGH); // Stay disabled; the next intentional move re-enables it.
+  ESP_SERIAL.println(espOnline ? F("STATE:ONLINE") : F("STATE:OFFLINE"));
 }
 
 bool checkCancel() {
@@ -201,7 +176,7 @@ void moveZStepsRelative(long deltaSteps) {
   int zDelay = max(1000, Z_STEP_PERIOD_US * 4);
   
   for (long i = 0; i < steps; ++i) {
-    if (checkEStop() || checkCancel()) break;
+    if (checkCancel()) break;
     digitalWrite(PIN_Z_STEP, HIGH);
     delayMicroseconds(STEP_PULSE_US);
     digitalWrite(PIN_Z_STEP, LOW);
@@ -231,7 +206,7 @@ void moveZSteps(long targetStepsZ) {
   int zDelay = max(1000, Z_STEP_PERIOD_US * 4);
 
   for (long i = 0; i < steps; ++i) {
-    if (checkEStop() || checkCancel()) break;
+    if (checkCancel()) break;
     digitalWrite(PIN_Z_STEP, HIGH);
     delayMicroseconds(STEP_PULSE_US);
     digitalWrite(PIN_Z_STEP, LOW);
@@ -241,13 +216,12 @@ void moveZSteps(long targetStepsZ) {
 }
 
 void homeZ() {
-  zHomingActive = true;
   int zDelay = max(1000, Z_STEP_PERIOD_US * 4);
 
   digitalWrite(PIN_Z_DIR, LOW);
   delayMicroseconds(5);
   while (!isZMaxSwitchPressed()) {
-    if (checkEStop() || checkCancel()) { zHomingActive = false; return; }
+    if (checkCancel()) return;
     digitalWrite(PIN_Z_STEP, HIGH);
     delayMicroseconds(STEP_PULSE_US);
     digitalWrite(PIN_Z_STEP, LOW);
@@ -259,14 +233,14 @@ void homeZ() {
 
   long approachSteps = lround_double(Z_MAX_TO_CR_TOUCH_APPROACH_MM * STEPS_PER_MM_Z);
   moveZStepsRelative(approachSteps);
-  if (eStopLatched || cancelRequested) { zHomingActive = false; return; }
+  if (cancelRequested) return;
 
   deployProbe();
 
   digitalWrite(PIN_Z_DIR, HIGH);
   delayMicroseconds(5);
   while (!isProbeTriggered()) {
-    if (checkEStop() || checkCancel()) { zHomingActive = false; return; }
+    if (checkCancel()) return;
     digitalWrite(PIN_Z_STEP, HIGH);
     delayMicroseconds(STEP_PULSE_US);
     digitalWrite(PIN_Z_STEP, LOW);
@@ -276,7 +250,6 @@ void homeZ() {
 
   currentStepsZ = 0;
   stowProbe();
-  zHomingActive = false;
 }
 
 bool setZDistanceFromPaper(float paperGapMM) {
@@ -314,23 +287,21 @@ float probeZ() {
   int zDelay = max(1000, Z_STEP_PERIOD_US * 4);
   digitalWrite(PIN_Z_DIR, HIGH);
   delayMicroseconds(5);
-  zHomingActive = true; // The probe touch here is expected -- don't let it trip a full e-stop.
   while (!isProbeTriggered()) {
-    if (checkEStop() || checkCancel()) { zHomingActive = false; stowProbe(); return 0.0f; }
+    if (checkCancel()) { stowProbe(); return 0.0f; }
     digitalWrite(PIN_Z_STEP, HIGH);
     delayMicroseconds(STEP_PULSE_US);
     digitalWrite(PIN_Z_STEP, LOW);
     currentStepsZ += 1;
     delayMicroseconds(zDelay);
   }
-  zHomingActive = false;
   float trigger_height = currentStepsZ / STEPS_PER_MM_Z;
   stowProbe();
 
   digitalWrite(PIN_Z_DIR, LOW);
   delayMicroseconds(5);
   for (int i = 0; i < (2.0f * STEPS_PER_MM_Z); i++) {
-    if (checkEStop() || checkCancel()) return trigger_height;
+    if (checkCancel()) return trigger_height;
     digitalWrite(PIN_Z_STEP, HIGH);
     delayMicroseconds(STEP_PULSE_US);
     digitalWrite(PIN_Z_STEP, LOW);
@@ -364,7 +335,7 @@ void stepN(long n, bool dir) {
   stepperX.move(dir ? n : -n);
   long lastPos = stepperX.currentPosition();
   while (stepperX.distanceToGo() != 0) {
-    if (checkEStop() || checkCancel()) break;
+    if (checkCancel()) break;
     stepperX.run();
     long pos = stepperX.currentPosition();
     if (pos != lastPos) {
@@ -376,53 +347,52 @@ void stepN(long n, bool dir) {
   }
 }
 
-void yStepPair(long stepsL, long stepsR, bool dir) {
-  if (stepsL <= 0 && stepsR <= 0) return;
+void yStepPair(long steps, bool dir) {
+  if (steps <= 0) return;
   digitalWrite(PIN_EN, LOW);
-  long N = max(stepsL, stepsR);
   float currentX_mm = currentSteps / STEPS_PER_MM_X;
-  float targetY_mm = (currentStepsY + (dir ? N : -N)) / STEPS_PER_MM_Y;
+  float targetY_mm = (currentStepsY + (dir ? steps : -steps)) / STEPS_PER_MM_Y;
   long startZ = currentStepsZ;
   long targetZ = lround_double(getInterpolatedZ(currentX_mm, targetY_mm) * STEPS_PER_MM_Z);
   long dz = targetZ - startZ;
   bool zDir = (dz > 0); dz = abs(dz);
-  long err = N / 2;
+  long err = steps / 2;
 
-  // When stepsL != stepsR (yMoveSkewMM), scale the shorter axis's speed/accel down by its
-  // share of the longer axis's distance so both motors' trapezoid profiles take the same
-  // elapsed time and finish together -- otherwise the shorter side would idle early while
-  // the other kept moving, racking the gantry beam that bridges both lead screws.
-  float ratioL = (float)stepsL / (float)N;
-  float ratioR = (float)stepsR / (float)N;
-  float baseSpeed = CFG.maxSpeedYmm * STEPS_PER_MM_Y;
-  float baseAccel = CFG.accelYmm * STEPS_PER_MM_Y;
-  stepperYL.setMaxSpeed(baseSpeed * ratioL); stepperYL.setAcceleration(baseAccel * ratioL);
-  stepperYR.setMaxSpeed(baseSpeed * ratioR); stepperYR.setAcceleration(baseAccel * ratioR);
+  // stepperYR mirrors stepperYL's steps directly (see FastDriverStepper::mirrorStep())
+  // instead of running its own independent AccelStepper profile -- the two motors always
+  // take identical steps at identical moments now that Y-trim is gone, so there's no
+  // reason to pay computeNewSpeed()'s software-float ramp math twice per step.
+  stepperYR.setMirrorDirection(dir);
+  stepperYL.move(dir ? steps : -steps);
 
-  stepperYL.move(dir ? stepsL : -stepsL);
-  stepperYR.move(dir ? stepsR : -stepsR);
+  long lastPos = stepperYL.currentPosition();
 
-  // Whichever side got the unscaled (ratio 1.0) distance always takes exactly N steps --
-  // same as the old loop's iteration count -- so it's the reference for currentStepsY and
-  // the mesh Z-interleave, exactly mirroring the previous loop-index-based Bresenham.
-  AccelStepper &ref = (stepsL >= stepsR) ? stepperYL : stepperYR;
-  long lastPos = ref.currentPosition();
+  // --- TEMP DEBUG: remove once the Y-speed investigation is done ---
+  unsigned long dbgT0 = micros();
+  unsigned long dbgIters = 0;
+  // --- end temp debug setup ---
 
-  while (stepperYL.distanceToGo() != 0 || stepperYR.distanceToGo() != 0) {
-    if (checkEStop() || checkCancel()) break;
+  while (stepperYL.distanceToGo() != 0) {
+    if (checkCancel()) break;
+    dbgIters++; // TEMP DEBUG
     stepperYL.run();
-    stepperYR.run();
-    long pos = ref.currentPosition();
+    long pos = stepperYL.currentPosition();
     if (pos != lastPos) {
       lastPos = pos;
+      stepperYR.mirrorStep(STEP_PULSE_US);
       currentStepsY += dir ? 1 : -1;
-      if (mesh_active && dz > 0) { err -= dz; if (err < 0) { zPulse(zDir); err += N; } }
+      if (mesh_active && dz > 0) { err -= dz; if (err < 0) { zPulse(zDir); err += steps; } }
     }
   }
 
-  // Restore full speed/accel so the next (presumably unskewed) call isn't left scaled down.
-  stepperYL.setMaxSpeed(baseSpeed); stepperYL.setAcceleration(baseAccel);
-  stepperYR.setMaxSpeed(baseSpeed); stepperYR.setAcceleration(baseAccel);
+  // --- TEMP DEBUG: remove once the Y-speed investigation is done ---
+  Serial.print(F("[YDBG] steps=")); Serial.print(steps);
+  Serial.print(F(" maxSpeedYmm=")); Serial.print(CFG.maxSpeedYmm);
+  Serial.print(F(" accelYmm=")); Serial.print(CFG.accelYmm);
+  Serial.print(F(" elapsedMs=")); Serial.print((micros() - dbgT0) / 1000UL);
+  Serial.print(F(" loopIters=")); Serial.print(dbgIters);
+  Serial.print(F(" itersPerStep=")); Serial.println((float)dbgIters / (float)steps);
+  // --- end temp debug ---
 }
 
 
@@ -444,50 +414,33 @@ void moveToPixel(long p) { moveToSteps(p * (long)STEPS_PER_PIXEL); }
 
 void yMoveMM(float mm, bool forward) {
   long s = lround_double(mm * STEPS_PER_MM_Y);
-  yStepPair(s, s, forward);
-}
-
-void yMoveSkewMM(float baseMM, float deltaRightMM, bool forward) {
-  long sL = lround_double(baseMM * STEPS_PER_MM_Y);
-  long sR = lround_double((baseMM + deltaRightMM) * STEPS_PER_MM_Y);
-  if (sR < 0) sR = 0;
-  yStepPair(sL, sR, forward);
+  yStepPair(s, forward);
 }
 
 // Y-axis counterpart to moveToSteps() for X: moves to an absolute Y step target from
 // wherever currentStepsY currently tracks.
 void moveYToSteps(long target) {
   long d = target - currentStepsY;
-  if (d) yStepPair(labs(d), labs(d), d > 0);
+  if (d) yStepPair(labs(d), d > 0);
 }
 
 void moveYToZero() { moveYToSteps(0); }
 
 // Shared by homeXY() (target 0,0) and moveToOffset() (target CFG.offsetXmm/offsetYmm):
-// moves X then Y to an absolute step target. Two related bugs used to live in this
-// sequence, both stemming from checkCancel()/checkEStop() being read at the *top* of
-// stepN's/yStepPair's loop:
-//  1) If the X leg got cut short (Back button, or an unrelated e-stop like the printhead
-//     thermal cutoff), cancelRequested/eStopLatched was still set when the Y leg started,
-//     so Y's very first check aborted it before a single step ran -- only X moved.
-//  2) Callers like runIncomingPrint() run a ~1s success chime (buzzPrintSuccess(), pure
-//     tone()+delay(), no button polling) right before calling this. A Back press landing
-//     during that window sits queued on the button and gets picked up by *this* function's
-//     very first checkCancel() instead -- silently aborting the X leg before it moves at
-//     all, with nothing having actually asked to cancel homing itself.
-// Discarding any queued Back-button press and clearing cancelRequested immediately before
-// each leg closes both gaps (eStopLatched is left alone -- that's a real safety fault and
-// must still block whichever leg hasn't run yet).
+// moves X then Y to an absolute step target. Discarding any queued Back-button press and
+// clearing cancelRequested immediately before each leg avoids a bug where a Back press
+// landing during a caller's pre-move chime/delay (e.g. runIncomingPrint()'s
+// buzzPrintSuccess(), pure tone()+delay(), no button polling) sits queued and gets picked
+// up by this function's very first checkCancel() instead -- silently aborting the X leg
+// before it moves at all, with nothing having actually asked to cancel homing itself.
 void moveToXYSteps(long targetX, long targetY, const __FlashStringHelper* title, const __FlashStringHelper* subtitle) {
   oledHeader(title); display.setCursor(0, 20); display.print(subtitle); display.sendBuffer();
   readButton(btnBack);
   cancelRequested = false;
   moveToSteps(targetX);
-  if (!eStopLatched) {
-    readButton(btnBack);
-    cancelRequested = false;
-    moveYToSteps(targetY);
-  }
+  readButton(btnBack);
+  cancelRequested = false;
+  moveYToSteps(targetY);
   cancelRequested = false;
 }
 
@@ -814,7 +767,6 @@ void printEntireBMP(const String &path) {
   display.sendBuffer();
 
   while (true) {
-    if (checkEStop()) return;
     if (readButton(btnEnter)) break;
     if (readButton(btnMinus)) return;
     delay(10);
@@ -822,7 +774,7 @@ void printEntireBMP(const String &path) {
 
   countdown_1s_tenths(F("Starting Print"));
   for (int slice = 0; slice < totalSlices; ++slice) {
-    if (eStopLatched || cancelRequested) return;
+    if (cancelRequested) return;
     const int visualStart = slice * 4;
     Image4x img;
     if (!readFourRowsAt(path, meta, visualStart, img)) {
@@ -892,7 +844,6 @@ static void printFromRowSource(RowSource &src, const String &label, bool skipSta
     display.sendBuffer();
 
     while (true) {
-      if (checkEStop()) return;
       if (readButton(btnEnter)) break;
       if (readButton(btnMinus)) return;
       delay(10);
@@ -902,7 +853,7 @@ static void printFromRowSource(RowSource &src, const String &label, bool skipSta
   countdown_1s_tenths(F("Starting Print"));
 
   for (int slice = 0; slice < totalSlices; ++slice) {
-    if (eStopLatched || cancelRequested) return;
+    if (cancelRequested) return;
     const int visualStart = slice;
     Image4x img;
 
@@ -915,13 +866,16 @@ static void printFromRowSource(RowSource &src, const String &label, bool skipSta
     }
 
     // Row is steady for the whole slice, so redraw it once here rather than on every
-    // column -- doPrintBMPSliceSerpentine only touches the footer LED/col row.
+    // column -- doPrintBMPSliceSerpentine only touches the temp line and footer LED/col
+    // row. drawTempReadout here just seeds this row's screen with the latest known
+    // reading immediately, instead of leaving it blank until the row's first fired pixel.
     const int rowShown = min(slice + 1, src.height);
     ESP_SERIAL.print(F("PROGRESS:")); ESP_SERIAL.print(rowShown); ESP_SERIAL.print(F(","));
     ESP_SERIAL.print(src.height); ESP_SERIAL.print(F("\n"));
     oledHeader(F("Printing"));
     display.setCursor(0, 12); displayPrintf(display, F("Row %d/%d"), rowShown, src.height);
     display.setCursor(0, 24); display.print(label);
+    drawTempReadout(lastLedTemp);
     display.sendBuffer();
 
     const bool forward = (slice % 2 == 0);
@@ -964,7 +918,7 @@ void printEntireBMP_4by(const String &path) {
   // Unlike the ESP32-triggered path (runIncomingPrint), nothing else moves this one
   // after it finishes -- without this, an SD-card print left the carriage wherever the
   // print ended. Park clear of the bed (not home) so the print can be grabbed.
-  if (!eStopLatched) moveClearOfBed();
+  moveClearOfBed();
   reportEspIdleState();
 }
 
@@ -994,7 +948,7 @@ void printHexData_4by(int w, int h, const String &hexData, bool skipStartPrompt)
 void doPrintBMPSliceSerpentine(Image4x &img, bool forward, bool byRow, bool applyInvert) {
   digitalWrite(PIN_EN, LOW);
 
-  const float mm_per_pixel = MM_PER_PIXEL; 
+  const float mm_per_pixel = MM_PER_PIXEL;
   const float led_spacing = LED_SPACING_MM;
   const float step_mm = 1.0f;
   const long steps_per_1mm = lround_double(step_mm * STEPS_PER_MM_X);
@@ -1015,7 +969,7 @@ void doPrintBMPSliceSerpentine(Image4x &img, bool forward, bool byRow, bool appl
   const float expDiv = byRow ? 0.25f : 1.0f;
 
   for (int s = sStart; ; s += sStep) {
-    if (eStopLatched || cancelRequested) break;
+    if (cancelRequested) break;
     float x_carriage = s * step_mm;
     uint32_t durations[4] = {0, 0, 0, 0};
     bool willFire[4] = {false, false, false, false};
@@ -1053,8 +1007,15 @@ void doPrintBMPSliceSerpentine(Image4x &img, bool forward, bool byRow, bool appl
       if (col >= img.width) col = img.width - 1;
       char buf[32];
       snprintf(buf, sizeof(buf), "Col %d/%d", col + 1, img.width);
+      // Shows the LED temp as of the previous pixel (queried below, after this pixel
+      // fires) -- one pixel of lag rather than re-querying the Nano before drawing, so
+      // this stays folded into drawStatusRow's single sendBuffer() flush per pixel.
+      drawTempReadout(lastLedTemp);
       drawStatusRow(willFire, String(buf));
       sendBatchToPrinthead(durations);
+      // waitForPrinthead() itself updates lastLedTemp/reports to the ESP for every fired
+      // pixel (not just every Nth) -- the Nano piggybacks T[0] on the S reply that already
+      // confirms firing is done, so no separate T round-trip is needed here anymore.
       waitForPrinthead();
     }
 
@@ -1086,7 +1047,7 @@ void printCalibrationPattern(float maxTimeSec) {
 
   // We will print exactly 16 rows
   for (int row = 0; row < 16; ++row) {
-    if (eStopLatched || cancelRequested) break;
+    if (cancelRequested) break;
 
     bool forward = (row % 2 == 0);
 
@@ -1098,7 +1059,7 @@ void printCalibrationPattern(float maxTimeSec) {
     int sStep  = forward ? 1 : -1;
 
     for (int s = sStart; ; s += sStep) {
-      if (eStopLatched || cancelRequested) break;
+      if (cancelRequested) break;
 
       float x_carriage = s * step_mm;
       uint32_t durations[4] = {0, 0, 0, 0};
@@ -1159,7 +1120,7 @@ void printCalibrationPattern(float maxTimeSec) {
       stepN(steps_per_1mm, forward);
     }
 
-    if (eStopLatched || cancelRequested) break;
+    if (cancelRequested) break;
 
     // Move down 1 pixel (2mm) for the next row
     yMoveMM(MM_PER_PIXEL, true);

@@ -34,3 +34,6 @@ desktop.ini
 
 # Claude Code local settings
 .claude/settings.local.json
+
+# Wi-Fi credentials for the ESP sketches
+secrets.h

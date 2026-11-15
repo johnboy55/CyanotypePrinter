@@ -9,9 +9,10 @@ bool buttonHeld(const Btn &b);
 void oledHeader(const char* title);
 void oledHeader(const __FlashStringHelper* title);
 void drawStatusRow(const bool ledOn[4], const String &rightText);
+void drawTempReadout(int tempC);
 String xyPositionString();
+void setLastEspIp(const String &ip);
 
-void renderEmergencyStopScreen();
 void menuMain();
 void menuXCtrl();
 void menuZCtrl();

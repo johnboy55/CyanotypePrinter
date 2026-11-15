@@ -18,7 +18,6 @@ const int PIN_Y_DIR   = 6;
 const int PIN_YR_DIR  = 7;    
 const int PIN_Z_STEP  = 12;
 const int PIN_Z_DIR   = 13;
-const int PIN_NANO_ESTOP = A8; // Shared Nano e-stop line (Z limit / Y limit / overtemp), see uv_globals.h
 const int PIN_BUZZER = 9;      // Piezo buzzer: alerts operator that an ESP32-triggered print is staged and waiting on [Enter]
 
 // Spare pins on the bare header, immediately after btnBack (29): 30-37.
@@ -52,9 +51,9 @@ int STEP_PULSE_US = 5;
 const int Z_STEP_PERIOD_US = 1000;
 const float PAPER_LOAD_Y_MM = 80.0f;
 
-AccelStepper stepperX (AccelStepper::DRIVER, PIN_STEP,    PIN_DIR);
-AccelStepper stepperYL(AccelStepper::DRIVER, PIN_YL_STEP, PIN_Y_DIR);
-AccelStepper stepperYR(AccelStepper::DRIVER, PIN_YR_STEP, PIN_YR_DIR);
+FastDriverStepper stepperX (PIN_STEP,    PIN_DIR);
+FastDriverStepper stepperYL(PIN_YL_STEP, PIN_Y_DIR);
+FastDriverStepper stepperYR(PIN_YR_STEP, PIN_YR_DIR);
 
 void applyMotionConfig() {
   stepperX.setMaxSpeed(CFG.maxSpeedXmm * STEPS_PER_MM_X);
@@ -64,10 +63,9 @@ void applyMotionConfig() {
   stepperYL.setMaxSpeed(CFG.maxSpeedYmm * STEPS_PER_MM_Y);
   stepperYL.setAcceleration(CFG.accelYmm * STEPS_PER_MM_Y);
   stepperYL.setMinPulseWidth(STEP_PULSE_US);
-
-  stepperYR.setMaxSpeed(CFG.maxSpeedYmm * STEPS_PER_MM_Y);
-  stepperYR.setAcceleration(CFG.accelYmm * STEPS_PER_MM_Y);
-  stepperYR.setMinPulseWidth(STEP_PULSE_US);
+  // stepperYR no longer runs its own move()/run() profile -- it mirrors stepperYL's
+  // steps directly (see yStepPair()/FastDriverStepper::mirrorStep()), so it has no
+  // speed/accel/pulse-width settings of its own to apply.
 }
 
 long currentSteps = 0;
@@ -83,12 +81,10 @@ bool mesh_active = false;
 const float MESH_MAX_X = 50.0f; 
 const float MESH_MAX_Y = 50.0f;
 
-volatile bool emergencyStopTriggered = false;
-volatile bool zHomingActive = false;
-bool eStopLatched = false;
-String eStopCause = "";
 bool cancelRequested = false;
 bool espOnline = false;
+int lastLedTemp = -1;
+char lastEspIp[16] = "--";
 float LUT16[16] = { 0.00, 0.10, 0.20, 0.30, 0.40, 0.55, 0.70, 0.90, 1.10, 1.30, 1.60, 2.00, 2.50, 3.20, 4.00, 5.00 };
 float LED_SCALE[4] = {1.0, 1.0, 1.0, 1.0}; // Provide actual definitions
 int ROW_FOR_LED[4] = {3, 2, 1, 0};
@@ -122,21 +118,15 @@ void buzzPrintSuccess() {
   noTone(PIN_ALERT_BUZZER);
 }
 
-// handleEmergencyStop() is defined in uv_print.cpp -- it needs PRINTHEAD_SERIAL to ask
-// the Nano which limit fired, so it lives alongside the other Nano UART helpers.
-
-void contactInterruptHandler() {
-  // ISR: keep this minimal (no Serial/SD/delay). Just latch the raw signal; classification
-  // (real e-stop vs. an expected homing touch) happens later in handleEmergencyStop().
-  emergencyStopTriggered = true;
-}
-
 void setup() {
   Serial.begin(115200);
 
   // ESP8266 / ESP-side link on the Mega+WiFi board uses Serial3
   // (RX3 = pin 15, TX3 = pin 14) for inter-processor communication.
   ESP_SERIAL.begin(ESP_BAUD);
+  // Give the status page a known state immediately at boot, instead of
+  // waiting up to 2s for menuMain()'s first idle heartbeat.
+  ESP_SERIAL.println(F("STATE:OFFLINE"));
   PRINTHEAD_SERIAL.begin(PRINTHEAD_BAUD);
   // Bound blocking reads on the printhead link. Every readStringUntil('\n') otherwise
   // waits the Stream default (1000ms) whenever a newline is lost to noise/corruption --
@@ -156,8 +146,6 @@ void setup() {
   
   pinMode(PIN_Z_STEP, OUTPUT);
   pinMode(PIN_Z_DIR, OUTPUT);
-  pinMode(PIN_NANO_ESTOP, INPUT_PULLUP);
-  attachPCINT(digitalPinToPCINT(PIN_NANO_ESTOP), contactInterruptHandler, FALLING);
 
   pinMode(btnPlus.pin, INPUT_PULLUP);
   pinMode(btnMinus.pin, INPUT_PULLUP);
@@ -203,12 +191,6 @@ void setup() {
 }
 
 void loop() {
-  if (emergencyStopTriggered) handleEmergencyStop();
-  if (eStopLatched) {
-    renderEmergencyStopScreen();
-    delay(10);
-    return;
-  }
   menuMain();
   delay(10);
 }

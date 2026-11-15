@@ -7,16 +7,16 @@ void waitForPrinthead();
 bool isProbeTriggered();
 bool isZMaxSwitchPressed();
 
-// --- Emergency stop ---
-int queryNanoLimitMask();   // -1 = Nano not responding, else bit0=Z bit1=Y bit2=overtemp
-void reportEspIdleState();  // Tells the ESP32 STATE:ONLINE/OFFLINE per espOnline/eStopLatched
-bool checkEStop();          // Services the raw ISR flag; returns true if caller should abort its loop
-void clearEmergencyStop();  // Operator-initiated resume after inspecting the cause
+void reportEspIdleState();  // Tells the ESP32 STATE:ONLINE/OFFLINE per espOnline
+
+// --- Printhead LED temperature (status page) ---
+int queryNanoLedTemp();     // -1 = Nano not responding, else printhead LED temp in Celsius
+void reportLedTempToEsp();  // Queries the Nano and forwards TEMP:<celsius> to the ESP32/ESP8266
+void reportLedTemp(int t);  // Records + forwards an already-known reading (no round-trip)
 
 // --- Operator cancel (Back button pressed mid-move/print) ---
-// Unlike checkEStop(), this is not a hardware fault: it doesn't latch or need the Nano
-// re-checked. Whichever menu function *started* the move/print is responsible for
-// resetting cancelRequested back to false once the operation has returned.
+// Whichever menu function *started* the move/print is responsible for resetting
+// cancelRequested back to false once the operation has returned.
 bool checkCancel();
 
 void moveZStepsRelative(long deltaSteps);
@@ -32,11 +32,10 @@ void stepPulseOnceX();
 void yPulseLeft();
 void yPulseRight();
 void stepN(long n, bool dir);
-void yStepPair(long stepsL, long stepsR, bool dir);
+void yStepPair(long steps, bool dir);
 void moveToSteps(long target);
 void moveToPixel(long p);
 void yMoveMM(float mm, bool forward);
-void yMoveSkewMM(float baseMM, float deltaRightMM, bool forward);
 void moveYToZero();
 void moveYToSteps(long target);
 // Shared absolute X+Y mover used by homeXY(), moveToOffset(), and testOffset()'s return

@@ -1,10 +1,16 @@
 /* ============================================================
  * UV Printhead - TIER 1: ESP8266 Web Server
+ * Firmware variant: OS-1.0 "OpenSauce" -- see /VERSIONS.md at repo root.
  * - Broadcasts standalone Wi-Fi AP ("Cyanotype_Printer")
  * - Hosts HTML/JS UI
  * - Converts JSON pixel arrays to Hexadecimal
  * - Streams commands to Arduino Mega via serial
+ * - Sibling of MotorController_ESP32_Status/ (the V1.0 Standard
+ *   variant's read-only status page) -- only one of the two is ever
+ *   flashed to the board's ESP8266 at a time.
  * ============================================================ */
+
+#define FW_VARIANT "OS-1.0-OpenSauce"
 
 #if defined(ARDUINO_ARCH_ESP8266)
 #include <ESP8266WiFi.h>
@@ -357,7 +363,8 @@ void handleJS() {
 }
 
 void handleStatus() {
-  StaticJsonDocument<128> doc;
+  StaticJsonDocument<160> doc;
+  doc["variant"] = FW_VARIANT;
   doc["state"] = stateName(printerState);
   if (printerState == PS_PRINTING) {
     doc["row"] = printProgressRow;
@@ -487,8 +494,11 @@ void setup() {
   Serial.begin(115200);      // Debug to PC
   MEGA_SERIAL.begin(MEGA_BAUD); // UART to Mega
   
+  Serial.print("\n");
+  Serial.println(FW_VARIANT);
+
   // Setup Wi-Fi Access Point
-  Serial.println("\nStarting Wi-Fi Access Point...");
+  Serial.println("Starting Wi-Fi Access Point...");
   WiFi.softAP(ssid, password,6, false, 4);
   
   Serial.print("Connect to Wi-Fi: ");

@@ -1,15 +1,32 @@
+## 0. Hardware & Firmware Versions
+
+This repo currently targets one hardware generation, **V1.0**, in two interchangeable
+firmware variants (**V1.0 Standard** and **OS-1.0 "OpenSauce"**). A V2.0 hardware
+redesign is planned but not started. See [VERSIONS.md](VERSIONS.md) for the full
+breakdown of what's on each board and which firmware folder goes with which variant --
+the architecture below applies to both.
+
 ## I. System Architecture
 
 The system operates across three distinct tiers, separating the user interface, the motion control, and the real-time hardware execution.
 
-**TIER 1: THE NETWORK HUB (ESP32)**
+**TIER 1: THE NETWORK HUB (ESP8266, on the Mega+WiFi board)**
 
+- **Chip:** The ESP8266 built into the Mega+WiFi board, talking to the ATmega2560 over
+  the Mega's `Serial3` (the same link exposed to a PC as COM3). Two interchangeable
+  sketches exist for this chip -- only one is ever flashed at a time:
+  - [MotorController_ESP32_Status/](MotorController_ESP32_Status/) -- **V1.0 Standard**: joins the
+    existing Wi-Fi network and serves a read-only status page (state, print progress,
+    printhead LED temp). Doesn't accept print submissions.
+  - [MotorController_ESP32/](MotorController_ESP32/) -- **OS-1.0 OpenSauce**: hosts its own
+    Wi-Fi Access Point and serves the pixel-art design webapp described below. The rest
+    of this section (HTTP POST, AP, `/print`) describes this variant.
 - **Input:** Receives HTTP POST (JSON) from the User's Web Browser.
 - **Core Functions:** 
   - Broadcasts a standalone Wi-Fi Access Point.
   - Hosts the `index.html` and `app.js` frontend files.
   - Converts the JSON pixel arrays into hexadecimal strings.
-- **Output:** Sends data down to Tier 2 via Hardware Serial2 (115200 Baud).
+- **Output:** Sends data down to Tier 2 via Hardware Serial3 (115200 Baud).
 
 **TIER 2: THE MAIN BRAIN (Arduino Mega 2560)**
 
@@ -22,7 +39,7 @@ The system operates across three distinct tiers, separating the user interface, 
 
 **TIER 3: THE PRINTHEAD MCU (Arduino Nano Custom PCB)**
 
-- **Hardware Attached:** 4x UV LEDs (D10-D13), CR Touch (D3 Servo, D7 Signal), 6x TMP36 Temp Sensors (A0-A5), and a NeoPixel Status LED (D8).
+- **Hardware Attached:** 4x UV LEDs (D10-D13), CR Touch (D3 Servo, D7 Signal), 2x TMP36 Temp Sensors (A0-A1), a NeoPixel Status LED (D8), and an optional I2C status OLED (A4/A5 SDA/SCL). D4, D9, A2, and A3 are unpopulated on V1.0.
 - **Core Functions:** 
   - Operates as a real-time peripheral device (never blocks the UART line).
   - Executes microsecond-precise UV exposure timers.
@@ -58,11 +75,11 @@ The Arduino Nano operates as a strict, non-blocking peripheral. It sits on Seria
 
 | Command | Action | Expected Return | NeoPixel Visual |
 |---|---|---|---|
-| `S\n` | Status Poll: Asks the Nano which LEDs are currently firing. | `S:[mask]` (e.g., `S:15` for all, `S:0` for none) | Dim White → Green |
+| `S\n` | Status Poll: Asks the Nano which LEDs are currently firing. | `S:[mask],[temp0]` (e.g., `S:15,42` for all firing at 42C, `S:0,42` for none firing) -- temp0 lets the Mega pick up the printhead LED temp off the same reply that confirms firing is done, no separate `T` needed | Dim White → Green |
 | `F:m,d0,d1,d2,d3\n` | Fire LEDs: Sends the bitmask (m) and microsecond durations (dX) for all 4 LEDs. | *(None, must poll with S to check when finished)* | Purple → Green |
 | `D\n` | Deploy Probe: Commands the CR Touch servo to drop the pin. | *(None)* | Cyan → Green |
 | `U\n` | Stow Probe: Commands the CR Touch servo to pull the pin up. | *(None)* | Cyan → Green |
 | `X\n` | Reset Probe: Commands CR Touch to clear red alarm states. | *(None)* | Cyan → Green |
 | `P\n` | Probe State: Checks if the CR Touch signal pin is triggered. | `P:1` (Triggered) or `P:0` (Open) | Cyan → Green |
-| `T\n` | Thermal Poll: Requests background temperature readings from the 6 sensors. | `T:v0,v1,v2,v3,v4,v5` *(Values in Celsius)* | Dim White → Green |
+| `T\n` | Thermal Poll: Requests background temperature readings from the 2 sensors. | `T:v0,v1` *(Values in Celsius; v0 is the printhead LED temp, with the thermal cutoff)* | Dim White → Green |
 | `R\n` | Emergency Reset: Immediately kills all active UV LEDs and resets timers. | *(None)* | Orange → Green |

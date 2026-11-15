@@ -184,3 +184,95 @@ bool loadCalibrationFile(const String &path) {
   }
   return (n == 16);
 }
+// --- LUT upload from the ESP8266 (Wi-Fi) ---------------------------------------------
+// Stop-and-wait, every line acked, so no burst ever comes near the 128-byte RX buffer:
+//   ESP -> "LUTB:<name>"                 Mega -> "LUTACK"
+//   ESP -> "LUTD:<i>,<v>,<v>,<v>,<v>"     Mega -> "LUTACK"   (i = 0, 4, 8, 12)
+//   ESP -> "LUTE"                        Mega -> "LUTOK:<name>.txt" or "LUTERR:<why>"
+// Any step can answer "LUTERR:<why>" instead, which also abandons the transfer. The new
+// file is written to /calibrations/<name>.txt and loaded as the active LUT straight away.
+static bool lutXferActive = false;
+static char lutXferName[20];
+static float lutXferVals[16];
+static uint8_t lutXferGot = 0;  // bit per 4-value block received
+
+static void lutReplyErr(const __FlashStringHelper *why) {
+  lutXferActive = false;
+  ESP_SERIAL.print(F("LUTERR:")); ESP_SERIAL.println(why);
+}
+
+static bool lutNameOk(const String &n) {
+  if (n.length() == 0 || n.length() >= sizeof(lutXferName)) return false;
+  for (unsigned i = 0; i < n.length(); i++) {
+    char c = n[i];
+    if (!isalnum((unsigned char)c) && c != '_' && c != '-') return false;
+  }
+  return true;
+}
+
+static bool saveAndLoadXferLut(String &pathOut) {
+  if (!SD.exists("/calibrations")) SD.mkdir("/calibrations");
+  pathOut = String(F("/calibrations/")) + lutXferName + F(".txt");
+  // FILE_WRITE appends -- remove first so a re-upload under the same name replaces it.
+  if (SD.exists(pathOut.c_str())) SD.remove(pathOut.c_str());
+  File f = SD.open(pathOut.c_str(), FILE_WRITE);
+  if (!f) return false;
+  for (int i = 0; i < 16; i++) {
+    if (i) f.print(',');
+    f.print(String(lutXferVals[i], 2));
+  }
+  f.println();
+  f.close();
+  return loadCalibrationFile(pathOut);
+}
+
+int handleEspLutLine(const String &line) {
+  if (line.startsWith(F("LUTB:"))) {
+    String name = line.substring(5);
+    name.trim();
+    if (!lutNameOk(name)) { lutReplyErr(F("bad name")); return 1; }
+    name.toCharArray(lutXferName, sizeof(lutXferName));
+    lutXferGot = 0;
+    lutXferActive = true;
+    ESP_SERIAL.println(F("LUTACK"));
+    return 1;
+  }
+  if (line.startsWith(F("LUTD:"))) {
+    if (!lutXferActive) { lutReplyErr(F("no transfer")); return 1; }
+    String rest = line.substring(5);
+    int comma = rest.indexOf(',');
+    int base = (comma > 0) ? rest.substring(0, comma).toInt() : -1;
+    if (base < 0 || base > 12 || base % 4) { lutReplyErr(F("bad block")); return 1; }
+    int n = 0, start = comma + 1;
+    while (n < 4) {
+      int next = rest.indexOf(',', start);
+      String tok = (next < 0) ? rest.substring(start) : rest.substring(start, next);
+      tok.trim();
+      if (!tok.length()) break;
+      lutXferVals[base + n++] = tok.toFloat();
+      if (next < 0) break;
+      start = next + 1;
+    }
+    if (n != 4) { lutReplyErr(F("bad block")); return 1; }
+    lutXferGot |= (1 << (base / 4));
+    ESP_SERIAL.println(F("LUTACK"));
+    return 1;
+  }
+  if (line == F("LUTE")) {
+    if (!lutXferActive) { lutReplyErr(F("no transfer")); return 1; }
+    lutXferActive = false;
+    if (lutXferGot != 0x0F) { lutReplyErr(F("missing values")); return 1; }
+    // Same rules the calibration tool's lut_format.py enforces: entry 0 is "no exposure",
+    // exposures never decrease, and nothing absurd (a typo'd 3000 s would cook the paper).
+    if (fabs(lutXferVals[0]) > 0.005f) { lutReplyErr(F("entry 0 must be 0")); return 1; }
+    for (int i = 1; i < 16; i++) {
+      if (lutXferVals[i] < lutXferVals[i - 1]) { lutReplyErr(F("values must not decrease")); return 1; }
+    }
+    if (lutXferVals[15] <= 0.0f || lutXferVals[15] > 600.0f) { lutReplyErr(F("max must be 0-600s")); return 1; }
+    String path;
+    if (!saveAndLoadXferLut(path)) { lutReplyErr(F("SD write/load failed")); return 1; }
+    ESP_SERIAL.print(F("LUTOK:")); ESP_SERIAL.print(lutXferName); ESP_SERIAL.println(F(".txt"));
+    return 2;
+  }
+  return 0;
+}

@@ -85,6 +85,49 @@ exposure levels) and the diagnostic plot before trusting the output.
 **5.** Copy `_final.txt` onto the SD card's `/calibrations/` folder and load
 it via `Calib > Load LUT`, same as any other calibration file.
 
+## Phone workflow: web app on the Raspberry Pi
+
+`web/app.py` does step 4 in a browser instead of a desktop window, so you can
+photograph the print with your phone and analyze it straight away. It:
+
+- takes the photo upload (EXIF rotation is fixed on upload);
+- lets you tap the 4 fiducials, then draws the patch grid over the photo so a
+  mis-tap is obvious, then has you tap each reference-card step;
+- runs the same analysis as `analyze_target.py` and shows the 16 values, any
+  warnings, and the diagnostic plot;
+- saves the LUT on the Pi (`~/cyanotype-calib/luts/<name>.txt`), offers it as
+  a download, and can **send it to the printer**. The Pi posts it to the
+  ESP8266, and the Mega saves it to `/calibrations/<name>.txt` and loads it.
+  This needs the V1.0 Standard ESP sketch (`MotorController_ESP32_Status`),
+  and the printer must be sitting on its main menu (not printing).
+
+There's no login. It's meant for a trusted LAN only.
+
+**Install on the Pi** (Raspberry Pi OS, from a checkout at `~/CyanotypePrinter`):
+
+```
+cd ~/CyanotypePrinter/Calibration
+python3 -m venv .venv
+.venv/bin/pip install -r requirements-web.txt
+.venv/bin/python web/app.py          # then browse to http://<pi-address>:8080
+```
+
+To start it at boot, use the included systemd unit (edit `User=` and the
+paths first if you aren't user `pi` or the checkout lives elsewhere):
+
+```
+sudo cp web/cyanotype-calib.service /etc/systemd/system/
+sudo systemctl daemon-reload
+sudo systemctl enable --now cyanotype-calib
+```
+
+**Sidecars:** the app lists any `*_sidecar.json` in this `Calibration/`
+folder plus any you upload from the page. The sidecar must be the one
+`gen_target.py` wrote for the target you printed.
+
+**Printer address:** the IP shown on the Mega's ESP32 screen. The app
+remembers the last one used.
+
 ## Design notes
 
 - Patch exposures are intentionally NOT a plain left-to-right ramp: each of

@@ -1019,6 +1019,19 @@ static void runIncomingPrint(int w, int h, const String &hexData) {
   moveClearOfBed();
 }
 
+// Shown after the ESP8266 hands over a LUT over Wi-Fi (see handleEspLutLine in uv_sd.cpp)
+// -- the upload came from a phone/Pi across the room, so the operator at the printer
+// gets told the active LUT just changed under them.
+static void showWifiLutLoaded() {
+  oledHeader(F("LUT via Wi-Fi"));
+  display.setCursor(0, 20); display.print(F("Saved + loaded:"));
+  display.setCursor(0, 30); display.print(loadedLUTName);
+  display.setCursor(0, 42);
+  display.print(String(F("min ")) + String(LUT16[0], 2) + F("s  max ") + String(LUT16[15], 2) + F("s"));
+  display.sendBuffer();
+  delay(1800);
+}
+
 void menuESP32Control() {
   String ip = F("waiting...");
   espOnline = false;
@@ -1051,10 +1064,13 @@ void menuESP32Control() {
         inBuf[inLen] = '\0';
         String line = String(inBuf); line.trim();
         inLen = 0;
+        int lutResult;
         if (line.startsWith(F("IP:"))) {
           ip = line.substring(3);
           setLastEspIp(ip);
           redraw = true;
+        } else if ((lutResult = handleEspLutLine(line)) != 0) {
+          if (lutResult == 2) { showWifiLutLoaded(); redraw = true; }
         } else if (espOnline && line.startsWith(F("PSTART:"))) {
           int c1 = line.indexOf(','); int c2 = line.indexOf(',', c1 + 1);
           int pw = (c1 > 0 && c2 > 0) ? line.substring(7, c1).toInt() : 0;
@@ -1174,8 +1190,10 @@ void menuMain() {
     nanoStatus = F("Offline");
   }
 
-  // Drain the ESP32/ESP8266's periodic "IP:..." broadcasts even when nobody's opened the
-  // ESP32 Control menu -- it resends its IP on a timer regardless of Mega menu state, so
+  // Drain the ESP32/ESP8266's periodic "IP:..." broadcasts (and Wi-Fi LUT uploads, which
+  // are only accepted here and in the ESP32 Control menu -- never mid-print or deep in a
+  // submenu, where the ESP just times out and tells the sender to retry) even when
+  // nobody's opened the ESP32 Control menu -- it resends its IP on a timer regardless of Mega menu state, so
   // without this the bytes would just sit unread in Serial3's RX buffer until someone
   // finally visits that menu.
   while (ESP_SERIAL.available()) {
@@ -1184,6 +1202,7 @@ void menuMain() {
     if (c == '\n') {
       eBuf.trim();
       if (eBuf.startsWith(F("IP:"))) setLastEspIp(eBuf.substring(3));
+      else if (handleEspLutLine(eBuf) == 2) showWifiLutLoaded();
       eBuf = "";
     } else {
       eBuf += c;

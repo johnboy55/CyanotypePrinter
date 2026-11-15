@@ -6,6 +6,9 @@
  *   and the printhead LED temperature
  * - Listens to the same Mega->ESP wire protocol already used by
  *   the pixel-art sketch (STATE:/PROGRESS:), plus a new TEMP: line
+ * - Accepts a new exposure LUT over Wi-Fi (POST /lut, or the upload
+ *   box on the status page) and hands it to the Mega, which saves it to
+ *   /calibrations on the SD card and loads it -- see sendLutToMega()
  * - Sibling of MotorController_ESP32/ (the OS-1.0 OpenSauce variant's
  *   pixel-art design tool), kept in its own directory so that project
  *   is untouched and can be reflashed later -- only one of the two
@@ -62,6 +65,11 @@ String megaInBuf = "";
 unsigned long lastIpBroadcast = 0;
 const unsigned long IP_BROADCAST_MS = 2000;
 
+// Reply to the LUT-upload handshake (LUTACK / LUTOK:<file> / LUTERR:<why>), captured by
+// handleMegaLine() while sendLutToMega() is waiting on it.
+String lutReply = "";
+bool lutReplyReady = false;
+
 const char* stateName(PrinterState s) {
   return (s == PS_PRINTING) ? "PRINTING" : "IDLE";
 }
@@ -86,7 +94,60 @@ void handleMegaLine(String line) {
   } else if (line.startsWith("TEMP:")) {
     ledTempC = line.substring(5).toInt();
     lastTempMs = millis();
+  } else if (line == "LUTACK" || line.startsWith("LUTOK:") || line.startsWith("LUTERR:")) {
+    lutReply = line;
+    lutReplyReady = true;
   }
+}
+
+// Reads whatever the Mega has sent and dispatches complete lines. Called from loop() and
+// from inside the LUT handshake, so status lines arriving mid-handshake still land.
+void pumpMegaSerial() {
+  while (MEGA_SERIAL.available()) {
+    char c = MEGA_SERIAL.read();
+    if (c == '\n') {
+      handleMegaLine(megaInBuf);
+      megaInBuf = "";
+    } else {
+      megaInBuf += c;
+    }
+  }
+}
+
+// Sends one handshake line and waits for the Mega's reply. The Mega only services LUT
+// lines from its main menu / ESP32 screen, so a timeout here means it's printing or
+// sitting in a submenu.
+bool lutStep(const String &out, String &reply) {
+  lutReplyReady = false;
+  MEGA_SERIAL.println(out);
+  unsigned long start = millis();
+  while (millis() - start < 3000) {
+    pumpMegaSerial();
+    if (lutReplyReady) { reply = lutReply; return true; }
+    delay(2);
+  }
+  return false;
+}
+
+// Pushes the 16 (already validated) values to the Mega in 4 acked blocks -- see
+// handleEspLutLine() in MotorController_Mega/uv_sd.cpp for the other side. Returns ""
+// on success with savedFile set, else a human-readable error.
+String sendLutToMega(const String &name, const float vals[16], String &savedFile) {
+  String reply;
+  if (!lutStep("LUTB:" + name, reply)) {
+    return "printer didn't answer -- leave it on the main menu (not printing) and try again";
+  }
+  if (reply != "LUTACK") return "printer refused: " + reply.substring(7);
+  for (int base = 0; base < 16; base += 4) {
+    String line = "LUTD:" + String(base);
+    for (int i = 0; i < 4; i++) line += "," + String(vals[base + i], 2);
+    if (!lutStep(line, reply)) return "printer stopped answering mid-transfer";
+    if (reply != "LUTACK") return "printer refused: " + reply.substring(7);
+  }
+  if (!lutStep("LUTE", reply)) return "printer didn't confirm the save";
+  if (!reply.startsWith("LUTOK:")) return "printer refused: " + reply.substring(7);
+  savedFile = reply.substring(6);
+  return "";
 }
 
 // ============================================================
@@ -120,6 +181,13 @@ const char index_html[] PROGMEM = R"rawliteral(
         #temp-value.normal { color: #7CFC7C; }
         #temp-value.unknown { color: #888; font-size: 24px; }
         #temp-label { color: #aaa; font-size: 14px; margin-top: 4px; }
+
+        #lut-card { max-width: 420px; margin: 24px auto 0 auto; padding: 16px; border-radius: 8px; background: #2a2a2a; text-align: left; }
+        #lut-card h2 { font-size: 16px; margin: 0 0 10px 0; }
+        #lut-card input[type=text] { width: 100%; box-sizing: border-box; padding: 8px; font-size: 16px; margin: 8px 0; background: #111; color: #fff; border: 1px solid #444; border-radius: 6px; }
+        #lut-card button { padding: 10px 14px; font-size: 15px; border-radius: 6px; border: none; background: #4d79ff; color: #fff; }
+        #lut-msg { margin-top: 10px; font-size: 14px; }
+        .ok { color: #7CFC7C; } .err { color: #ff8888; }
     </style>
 </head>
 <body>
@@ -133,6 +201,14 @@ const char index_html[] PROGMEM = R"rawliteral(
     <div id="temp-card">
         <div id="temp-value" class="unknown">--</div>
         <div id="temp-label">Printhead LED Temp</div>
+    </div>
+
+    <div id="lut-card">
+        <h2>Load a LUT</h2>
+        <input type="file" id="lut-file" accept=".txt,text/plain">
+        <input type="text" id="lut-name" maxlength="19" placeholder="name (letters, numbers, _ -)">
+        <button id="lut-send">Send to printer</button>
+        <div id="lut-msg"></div>
     </div>
 
     <script>
@@ -183,6 +259,25 @@ const char index_html[] PROGMEM = R"rawliteral(
 
         pollStatus();
         setInterval(pollStatus, 1500);
+
+        const lutFile = document.getElementById('lut-file');
+        const lutName = document.getElementById('lut-name');
+        const lutMsg = document.getElementById('lut-msg');
+        lutFile.onchange = () => {
+            const f = lutFile.files[0];
+            if (f && !lutName.value) lutName.value = f.name.replace(/\.txt$/i, '').replace(/[^A-Za-z0-9_-]+/g, '_').slice(0, 19);
+        };
+        document.getElementById('lut-send').onclick = async () => {
+            const f = lutFile.files[0];
+            if (!f) { lutMsg.className = 'err'; lutMsg.textContent = 'Choose a LUT .txt file first.'; return; }
+            lutMsg.className = ''; lutMsg.textContent = 'Sending...';
+            try {
+                const r = await fetch('/lut?name=' + encodeURIComponent(lutName.value), { method: 'POST', headers: { 'Content-Type': 'text/plain' }, body: await f.text() });
+                const d = await r.json();
+                lutMsg.className = d.ok ? 'ok' : 'err';
+                lutMsg.textContent = d.ok ? ('Saved and loaded ' + d.file) : d.error;
+            } catch (e) { lutMsg.className = 'err'; lutMsg.textContent = 'Request failed: ' + e; }
+        };
     </script>
 </body>
 </html>
@@ -216,6 +311,64 @@ void handleStatus() {
   server.send(200, "application/json", out);
 }
 
+void sendJsonError(int code, const String &msg) {
+  StaticJsonDocument<192> doc;
+  doc["ok"] = false;
+  doc["error"] = msg;
+  String out;
+  serializeJson(doc, out);
+  server.send(code, "application/json", out);
+}
+
+// POST /lut?name=<name>   body: the LUT file text (16 comma-separated seconds)
+// No authentication -- this sketch is LAN-only by design.
+void handleLutUpload() {
+  String name = server.arg("name");
+  name.trim();
+  if (name.length() == 0 || name.length() > 19) { sendJsonError(400, "name must be 1-19 characters"); return; }
+  for (unsigned i = 0; i < name.length(); i++) {
+    char c = name[i];
+    if (!isalnum((unsigned char)c) && c != '_' && c != '-') { sendJsonError(400, "name may only use letters, numbers, _ and -"); return; }
+  }
+  if (printerState == PS_PRINTING) { sendJsonError(409, "printer is busy printing -- try again when it's idle"); return; }
+
+  // Same rules as the calibration tool's lut_format.py, checked here too so a bad file
+  // gets a clear error in the browser instead of a terse refusal from the Mega.
+  String body = server.arg("plain");
+  float vals[16];
+  int n = 0, start = 0;
+  while (n < 17) {
+    int comma = body.indexOf(',', start);
+    String tok = (comma < 0) ? body.substring(start) : body.substring(start, comma);
+    tok.trim();
+    if (tok.length() == 0) break;
+    char *end;
+    float v = strtof(tok.c_str(), &end);
+    if (*end != '\0') { sendJsonError(400, "LUT has a non-numeric value: " + tok); return; }
+    if (n < 16) vals[n] = v;
+    n++;
+    if (comma < 0) break;
+    start = comma + 1;
+  }
+  if (n != 16) { sendJsonError(400, "LUT must have exactly 16 comma-separated values, found " + String(n)); return; }
+  if (fabs(vals[0]) > 0.005f) { sendJsonError(400, "LUT entry 0 must be 0"); return; }
+  for (int i = 1; i < 16; i++) {
+    if (vals[i] < vals[i - 1]) { sendJsonError(400, "LUT values must not decrease"); return; }
+  }
+  if (vals[15] <= 0.0f || vals[15] > 600.0f) { sendJsonError(400, "LUT max must be between 0 and 600 s"); return; }
+
+  String savedFile;
+  String err = sendLutToMega(name, vals, savedFile);
+  if (err.length()) { sendJsonError(503, err); return; }
+
+  StaticJsonDocument<128> doc;
+  doc["ok"] = true;
+  doc["file"] = savedFile;
+  String out;
+  serializeJson(doc, out);
+  server.send(200, "application/json", out);
+}
+
 // ============================================================
 // --- Setup & Loop ---
 // ============================================================
@@ -239,6 +392,7 @@ void setup() {
 
   server.on("/", HTTP_GET, handleRoot);
   server.on("/status", HTTP_GET, handleStatus);
+  server.on("/lut", HTTP_POST, handleLutUpload);
   server.begin();
   Serial.println("Web server started.");
 
@@ -250,16 +404,8 @@ void setup() {
 void loop() {
   server.handleClient();
 
-  // Parse status lines from the Mega (STATE:/PROGRESS:/TEMP:).
-  while (MEGA_SERIAL.available()) {
-    char c = MEGA_SERIAL.read();
-    if (c == '\n') {
-      handleMegaLine(megaInBuf);
-      megaInBuf = "";
-    } else {
-      megaInBuf += c;
-    }
-  }
+  // Parse status lines from the Mega (STATE:/PROGRESS:/TEMP:/LUT replies).
+  pumpMegaSerial();
 
   // Keep the Mega's displayed IP fresh, same cadence as the pixel-art sketch.
   if (millis() - lastIpBroadcast > IP_BROADCAST_MS) {

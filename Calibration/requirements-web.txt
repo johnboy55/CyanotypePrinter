@@ -1,0 +1,11 @@
+# Everything the web app (web/app.py) needs, for a headless server like the Pi.
+# Install this INSTEAD of requirements.txt there: it swaps opencv-python for the
+# headless build (no GUI libraries to drag in), and the two conflict if both
+# are installed in one environment.
+numpy>=1.24
+Pillow>=10.0
+scipy>=1.11
+matplotlib>=3.7
+opencv-python-headless>=4.8
+flask>=3.0
+waitress>=3.0

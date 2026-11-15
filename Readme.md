@@ -67,6 +67,19 @@ The ESP32 intercepts this JSON, strips out the network overhead, and compresses 
 - **Example:** `P:8,8:000F0000FF00FF00...`
 - **Mechanics:** 0 stays 0, 15 becomes F. The Mega reads this string, unpacks the hex characters back into integers, and loads them into its local memory for serpentine printing.
 
+**3. Exposure LUT upload (V1.0 Standard sketch only)**
+
+`MotorController_ESP32_Status` accepts a new 16-entry exposure LUT over Wi-Fi and hands it to the Mega, which saves it as `/calibrations/<name>.txt` on the SD card and makes it the active LUT. The calibration web app on the Pi (`Calibration/web/`) uses this, and the status page has an upload box too. There is no authentication: it's LAN-only.
+
+- **HTTP:** `POST /lut?name=<name>`. The body is the LUT file text: 16 comma-separated seconds. The name can be 1–19 characters, using only letters, numbers, `_` and `-`. Entry 0 must be 0, values must not decrease, and the max must be ≤ 600 s.
+- **Reply:** `{"ok":true,"file":"<name>.txt"}`, or `{"ok":false,"error":"..."}` with HTTP 400 for a bad LUT, 409 while printing, or 503 if the Mega didn't answer.
+- **ESP → Mega UART:** stop-and-wait, and every line is acknowledged, so no burst gets near the Mega's 128-byte RX buffer:
+  - `LUTB:<name>` → `LUTACK`
+  - `LUTD:<i>,<v>,<v>,<v>,<v>` for i = 0, 4, 8, 12 → `LUTACK` each
+  - `LUTE` → `LUTOK:<name>.txt` once saved and loaded
+  - Any step can instead answer `LUTERR:<reason>`, which abandons the transfer.
+- The Mega only services these lines from the **main menu** or the **ESP32 screen**. Mid-print or deep in a submenu it doesn't read them, so the ESP times out after 3 s and returns an error saying to leave the printer on the main menu.
+
 ## III. Protocol: Mega to Printhead (The Hardware UART Dictionary)
 
 The Arduino Nano operates as a strict, non-blocking peripheral. It sits on Serial1 at 115200 baud, listening for newline-terminated ASCII commands. It immediately executes them and responds with a status string and a NeoPixel color flash.

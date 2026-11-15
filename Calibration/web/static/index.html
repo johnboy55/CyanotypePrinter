@@ -1,0 +1,368 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>LUT Calibration</title>
+<style>
+  :root {
+    --bg: #f6f6f4; --card: #fff; --text: #1d1d1f; --muted: #6b6b70; --line: #ddd;
+    --accent: #1f5fbf; --accent-text: #fff; --warn-bg: #fff4d6; --warn-text: #6b4a00;
+    --err-bg: #fde3e3; --err-text: #8a1c1c; --ok-bg: #e2f4e4; --ok-text: #1d5b26;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #161618; --card: #222225; --text: #ececee; --muted: #a0a0a8; --line: #3a3a3f;
+      --accent: #5b93ea; --accent-text: #0b1220; --warn-bg: #3d3216; --warn-text: #f3d68a;
+      --err-bg: #3f1d1d; --err-text: #f4b0b0; --ok-bg: #1d3a22; --ok-text: #a6e3b0;
+    }
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; font: 16px/1.45 system-ui, -apple-system, sans-serif; background: var(--bg); color: var(--text); }
+  main { max-width: 760px; margin: 0 auto; padding: 16px; }
+  h1 { font-size: 22px; margin: 4px 0 16px; }
+  h2 { font-size: 17px; margin: 0 0 12px; }
+  section { background: var(--card); border: 1px solid var(--line); border-radius: 10px; padding: 16px; margin-bottom: 16px; }
+  label { display: block; font-size: 14px; color: var(--muted); margin: 12px 0 4px; }
+  label:first-of-type { margin-top: 0; }
+  select, input[type=text], input[type=number] {
+    width: 100%; padding: 10px; font-size: 16px; border: 1px solid var(--line); border-radius: 8px;
+    background: var(--bg); color: var(--text);
+  }
+  .row { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+  .row > select, .row > input { flex: 1; min-width: 0; }
+  button, .btn {
+    padding: 10px 14px; font-size: 15px; border-radius: 8px; border: 1px solid var(--line);
+    background: var(--bg); color: var(--text); cursor: pointer; text-decoration: none; display: inline-block;
+  }
+  button.primary, .btn.primary { background: var(--accent); color: var(--accent-text); border-color: var(--accent); }
+  button:disabled { opacity: .45; cursor: default; }
+  .hint { font-size: 13px; color: var(--muted); margin-top: 4px; }
+  .file-btn { position: relative; overflow: hidden; }
+  .file-btn input { position: absolute; inset: 0; opacity: 0; cursor: pointer; }
+  #prompt { font-weight: 600; margin-bottom: 8px; min-height: 1.45em; }
+  #canvas-wrap { overflow: auto; max-height: 70vh; border: 1px solid var(--line); border-radius: 8px; background: #000; touch-action: pan-x pan-y pinch-zoom; }
+  #canvas { display: block; width: 100%; cursor: crosshair; }
+  .msg { padding: 10px 12px; border-radius: 8px; margin-top: 12px; font-size: 14px; }
+  .msg.warn { background: var(--warn-bg); color: var(--warn-text); }
+  .msg.err { background: var(--err-bg); color: var(--err-text); }
+  .msg.ok { background: var(--ok-bg); color: var(--ok-text); }
+  .msg ul { margin: 4px 0 0; padding-left: 20px; }
+  #lut-grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 6px; margin: 12px 0; font-variant-numeric: tabular-nums; }
+  #lut-grid div { background: var(--bg); border-radius: 6px; padding: 6px; text-align: center; font-size: 14px; }
+  #lut-grid small { display: block; color: var(--muted); font-size: 11px; }
+  #plot { width: 100%; border-radius: 8px; margin-top: 8px; background: #fff; }
+  .lut-item { display: flex; justify-content: space-between; align-items: center; gap: 8px; padding: 10px 0; border-top: 1px solid var(--line); }
+  .lut-item:first-child { border-top: none; }
+  .lut-item .name { font-weight: 600; word-break: break-all; }
+  .lut-item .when { font-size: 12px; color: var(--muted); }
+  .hidden { display: none !important; }
+</style>
+</head>
+<body>
+<main>
+  <h1>LUT Calibration</h1>
+
+  <section id="setup">
+    <h2>1. Setup</h2>
+    <label for="sidecar">Target sidecar (from gen_target.py)</label>
+    <div class="row">
+      <select id="sidecar"></select>
+      <span class="btn file-btn">Upload<input type="file" id="sidecar-file" accept=".json,application/json"></span>
+    </div>
+
+    <label for="card">Reference card</label>
+    <div class="row">
+      <select id="card"></select>
+      <span class="btn file-btn">Upload CSV<input type="file" id="card-file" accept=".csv,text/csv"></span>
+    </div>
+    <div class="hint">Custom CSV: <code>label,density</code> or <code>label,reflectance_pct</code> columns, white to black.</div>
+
+    <div class="row" style="margin-top:12px">
+      <div style="flex:1">
+        <label for="dmax">Target Dmax</label>
+        <input type="number" id="dmax" value="1.8" step="0.05" min="0.2" max="3">
+      </div>
+      <div style="flex:1">
+        <label for="mode">Even steps in</label>
+        <select id="mode"><option value="Lstar">L* (perceptual)</option><option value="density">Density</option></select>
+      </div>
+    </div>
+
+    <label for="lut-name">LUT name</label>
+    <input type="text" id="lut-name" maxlength="19" autocomplete="off" placeholder="e.g. vandyke_1114">
+    <div class="hint">Letters, numbers, _ and - only. Saved as &lt;name&gt;.txt on the Pi and the printer's SD card.</div>
+
+    <label>Photo of the developed target and reference card</label>
+    <span class="btn primary file-btn">Take or choose photo<input type="file" id="photo-file" accept="image/*"></span>
+    <div id="setup-msg"></div>
+  </section>
+
+  <section id="tap" class="hidden">
+    <h2>2. Tap points</h2>
+    <div id="prompt"></div>
+    <div class="row" style="margin-bottom:8px">
+      <button id="zoom-out">Zoom &minus;</button>
+      <button id="zoom-in">Zoom +</button>
+      <button id="undo">Undo</button>
+      <button id="restart">Start over</button>
+    </div>
+    <div id="canvas-wrap"><canvas id="canvas"></canvas></div>
+    <div class="hint">Fiducials: tap the <b>center</b> of each solid black corner square. Card: tap the middle of each step. The blue outlines show where each patch will be sampled; if they don't sit on the patches, undo and re-tap the corners.</div>
+    <div style="margin-top:12px"><button id="analyze" class="primary" disabled>Analyze</button></div>
+    <div id="tap-msg"></div>
+  </section>
+
+  <section id="result" class="hidden">
+    <h2>3. Result: <span id="result-name"></span></h2>
+    <div id="result-warn"></div>
+    <div id="lut-grid"></div>
+    <div class="row">
+      <a id="download" class="btn primary" href="#">Download .txt</a>
+      <button id="send-result">Send to printer</button>
+    </div>
+    <div id="send-msg"></div>
+    <img id="plot" alt="Measured densities, fitted curve and the 16 chosen LUT points">
+  </section>
+
+  <section>
+    <h2>Printer</h2>
+    <label for="printer-host">Printer address</label>
+    <input type="text" id="printer-host" placeholder="192.168.1.50" autocomplete="off">
+    <div class="hint">The IP shown on the Mega's ESP32 screen. Leave the printer on the main menu when sending: it only accepts a LUT while idle there or on the ESP32 screen.</div>
+  </section>
+
+  <section>
+    <h2>Saved LUTs on this Pi</h2>
+    <div id="lut-list"></div>
+    <div id="list-msg"></div>
+  </section>
+</main>
+
+<script>
+const $ = id => document.getElementById(id);
+let OPTS = null;
+const S = { photo: null, img: null, fids: [], cardPts: [], quads: null, zoom: 1, result: null };
+
+function msg(el, kind, text, list) {
+  el.innerHTML = '';
+  if (!text) return;
+  const d = document.createElement('div');
+  d.className = 'msg ' + kind;
+  d.textContent = text;
+  if (list && list.length) {
+    const ul = document.createElement('ul');
+    list.forEach(t => { const li = document.createElement('li'); li.textContent = t; ul.appendChild(li); });
+    d.appendChild(ul);
+  }
+  el.appendChild(d);
+}
+
+async function api(path, opts = {}) {
+  const r = await fetch(path, opts);
+  let body = {};
+  try { body = await r.json(); } catch (_) {}
+  if (!r.ok) throw new Error(body.error || ('HTTP ' + r.status));
+  return body;
+}
+const postJson = (path, obj) => api(path, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(obj) });
+
+function cardLabels() {
+  const c = OPTS.cards.find(c => c.id === $('card').value);
+  return c ? c.labels : [];
+}
+
+function fillSelect(sel, items, keep) {
+  const prev = keep || sel.value;
+  sel.innerHTML = '';
+  items.forEach(([v, t]) => { const o = document.createElement('option'); o.value = v; o.textContent = t; sel.appendChild(o); });
+  if (items.some(([v]) => v === prev)) sel.value = prev;
+}
+
+async function loadOptions(keepSidecar, keepCard) {
+  OPTS = await api('/api/options');
+  fillSelect($('sidecar'), OPTS.sidecars.map(s => [s, s]), keepSidecar || localStorage.getItem('sidecar'));
+  fillSelect($('card'), OPTS.cards.map(c => [c.id, `${c.id} (${c.labels.length} steps)`]), keepCard || localStorage.getItem('card'));
+  if (!$('printer-host').value) $('printer-host').value = OPTS.printer_host || '';
+  renderLutList(OPTS.luts);
+}
+
+function renderLutList(luts) {
+  const box = $('lut-list');
+  box.innerHTML = '';
+  if (!luts.length) { box.innerHTML = '<div class="hint">None yet.</div>'; return; }
+  luts.forEach(l => {
+    const row = document.createElement('div');
+    row.className = 'lut-item';
+    row.innerHTML = `<div><div class="name"></div><div class="when"></div></div>
+      <div class="row"><a class="btn" href="/api/luts/${encodeURIComponent(l.name)}.txt">Download</a><button>Send</button></div>`;
+    row.querySelector('.name').textContent = l.name;
+    row.querySelector('.when').textContent = l.modified.replace('T', ' ');
+    row.querySelector('button').onclick = () => sendToPrinter(l.name, $('list-msg'));
+    box.appendChild(row);
+  });
+}
+
+// --- setup uploads ---
+$('sidecar').onchange = () => { localStorage.setItem('sidecar', $('sidecar').value); resetPoints(); };
+$('card').onchange = () => { localStorage.setItem('card', $('card').value); S.cardPts = []; updateTap(); };
+
+$('sidecar-file').onchange = async e => {
+  const f = e.target.files[0]; if (!f) return;
+  const fd = new FormData(); fd.append('file', f);
+  try { const r = await api('/api/sidecars', { method: 'POST', body: fd }); await loadOptions(r.name); localStorage.setItem('sidecar', r.name); msg($('setup-msg'), 'ok', 'Sidecar uploaded: ' + r.name); }
+  catch (err) { msg($('setup-msg'), 'err', err.message); }
+  e.target.value = '';
+};
+$('card-file').onchange = async e => {
+  const f = e.target.files[0]; if (!f) return;
+  const fd = new FormData(); fd.append('file', f);
+  try { const r = await api('/api/cards', { method: 'POST', body: fd }); await loadOptions(null, r.id); localStorage.setItem('card', r.id); msg($('setup-msg'), 'ok', `Card uploaded: ${r.labels.length} steps`); }
+  catch (err) { msg($('setup-msg'), 'err', err.message); }
+  e.target.value = '';
+};
+
+$('photo-file').onchange = async e => {
+  const f = e.target.files[0]; if (!f) return;
+  if (!$('sidecar').value) { msg($('setup-msg'), 'err', 'Pick or upload the target sidecar first.'); e.target.value = ''; return; }
+  msg($('setup-msg'), 'warn', 'Uploading photo…');
+  const fd = new FormData(); fd.append('photo', f);
+  try {
+    S.photo = await api('/api/photos', { method: 'POST', body: fd });
+    const img = new Image();
+    img.onload = () => {
+      S.img = img; S.zoom = 1;
+      const c = $('canvas'); c.width = img.width; c.height = img.height;
+      resetPoints();
+      $('tap').classList.remove('hidden');
+      $('result').classList.add('hidden');
+      msg($('setup-msg'), '', '');
+      $('tap').scrollIntoView({ behavior: 'smooth' });
+    };
+    img.src = S.photo.url;
+  } catch (err) { msg($('setup-msg'), 'err', err.message); }
+  e.target.value = '';
+};
+
+// --- tapping ---
+function resetPoints() { S.fids = []; S.cardPts = []; S.quads = null; updateTap(); }
+
+function currentStep() {
+  if (S.fids.length < 4) return { kind: 'fid', label: OPTS.fiducial_order[S.fids.length], i: S.fids.length, n: 4 };
+  const labels = cardLabels();
+  if (S.cardPts.length < labels.length) return { kind: 'card', label: labels[S.cardPts.length], i: S.cardPts.length, n: labels.length };
+  return null;
+}
+
+function updateTap() {
+  if (!S.img) return;
+  const st = currentStep();
+  $('prompt').textContent = !st ? 'All points placed. Tap Analyze.'
+    : st.kind === 'fid' ? `Tap the ${st.label} fiducial (${st.i + 1} of 4)`
+    : `Tap reference card step "${st.label}" (${st.i + 1} of ${st.n}, white to black)`;
+  $('analyze').disabled = !!st;
+  draw();
+}
+
+function draw() {
+  const c = $('canvas'), ctx = c.getContext('2d');
+  ctx.drawImage(S.img, 0, 0);
+  const r = Math.max(6, Math.max(c.width, c.height) / 180);
+  ctx.lineWidth = Math.max(2, r / 3);
+  ctx.font = `bold ${Math.round(r * 2.2)}px system-ui, sans-serif`;
+  if (S.quads) {
+    ctx.strokeStyle = 'rgba(60,140,255,0.9)';
+    S.quads.forEach(q => { ctx.beginPath(); q.forEach(([x, y], i) => i ? ctx.lineTo(x, y) : ctx.moveTo(x, y)); ctx.closePath(); ctx.stroke(); });
+  }
+  const mark = (x, y, color, text) => {
+    ctx.strokeStyle = '#000'; ctx.fillStyle = color;
+    ctx.beginPath(); ctx.arc(x, y, r, 0, Math.PI * 2); ctx.fill(); ctx.stroke();
+    ctx.lineWidth = Math.max(2, r / 3);
+    ctx.strokeText(text, x + r * 1.3, y - r * 0.6); ctx.fillText(text, x + r * 1.3, y - r * 0.6);
+  };
+  S.fids.forEach(([x, y], i) => mark(x, y, '#ff3b30', OPTS.fiducial_order[i]));
+  const labels = cardLabels();
+  S.cardPts.forEach(([x, y], i) => mark(x, y, '#34c759', labels[i] || String(i)));
+}
+
+$('canvas').addEventListener('click', async ev => {
+  const st = currentStep(); if (!st) return;
+  const c = $('canvas'), b = c.getBoundingClientRect();
+  const x = (ev.clientX - b.left) * c.width / b.width;
+  const y = (ev.clientY - b.top) * c.height / b.height;
+  if (st.kind === 'fid') {
+    S.fids.push([x, y]);
+    if (S.fids.length === 4) await previewGrid();
+  } else {
+    S.cardPts.push([x, y]);
+  }
+  updateTap();
+});
+
+async function previewGrid() {
+  try {
+    const r = await postJson('/api/preview-grid', { sidecar: $('sidecar').value, fiducials: S.fids });
+    S.quads = r.quads; msg($('tap-msg'), '', '');
+  } catch (err) {
+    S.quads = null; msg($('tap-msg'), 'err', err.message + ' Undo and re-tap.');
+  }
+}
+
+$('undo').onclick = () => {
+  if (S.cardPts.length) S.cardPts.pop();
+  else if (S.fids.length) { S.fids.pop(); S.quads = null; msg($('tap-msg'), '', ''); }
+  updateTap();
+};
+$('restart').onclick = () => { resetPoints(); msg($('tap-msg'), '', ''); };
+function setZoom(z) { S.zoom = Math.min(6, Math.max(1, z)); $('canvas').style.width = (S.zoom * 100) + '%'; }
+$('zoom-in').onclick = () => setZoom(S.zoom * 1.5);
+$('zoom-out').onclick = () => setZoom(S.zoom / 1.5);
+
+// --- analyze ---
+$('analyze').onclick = async () => {
+  $('analyze').disabled = true;
+  msg($('tap-msg'), 'warn', 'Analyzing…');
+  try {
+    const r = await postJson('/api/analyze', {
+      photo_id: S.photo.id, sidecar: $('sidecar').value, card: $('card').value,
+      target_dmax: parseFloat($('dmax').value), mode: $('mode').value,
+      fiducials: S.fids, card_points: S.cardPts, lut_name: $('lut-name').value,
+    });
+    S.result = r;
+    msg($('tap-msg'), '', '');
+    showResult(r);
+    loadOptions();
+  } catch (err) {
+    msg($('tap-msg'), 'err', err.message);
+  }
+  $('analyze').disabled = !!currentStep();
+};
+
+function showResult(r) {
+  $('result').classList.remove('hidden');
+  $('result-name').textContent = r.lut_name;
+  if (r.warnings.length) msg($('result-warn'), 'warn', 'Check these before trusting the LUT:', r.warnings);
+  else msg($('result-warn'), 'ok', 'No warnings.');
+  const g = $('lut-grid'); g.innerHTML = '';
+  r.values.forEach((v, i) => { const d = document.createElement('div'); d.innerHTML = `<small>${i}</small>${v.toFixed(2)}s`; g.appendChild(d); });
+  $('download').href = r.download_url;
+  $('plot').src = r.plot_url + '?t=' + Date.now();
+  msg($('send-msg'), '', '');
+  $('result').scrollIntoView({ behavior: 'smooth' });
+}
+$('send-result').onclick = () => S.result && sendToPrinter(S.result.lut_name, $('send-msg'));
+
+async function sendToPrinter(name, el) {
+  const host = $('printer-host').value.trim();
+  if (!host) { msg(el, 'err', 'Enter the printer address under "Printer" first.'); $('printer-host').focus(); return; }
+  msg(el, 'warn', `Sending ${name} to ${host}…`);
+  try {
+    const r = await postJson('/api/send-to-printer', { lut_name: name, host });
+    msg(el, 'ok', `Printer saved and loaded ${r.printer.file || name + '.txt'}.`);
+  } catch (err) { msg(el, 'err', err.message); }
+}
+
+loadOptions().catch(err => msg($('setup-msg'), 'err', 'Could not load options: ' + err.message));
+</script>
+</body>
+</html>

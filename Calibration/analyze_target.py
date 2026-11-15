@@ -18,26 +18,15 @@ from __future__ import annotations
 
 import argparse
 import sys
-from collections import defaultdict
 
 import numpy as np
-from PIL import Image
+from PIL import Image, ImageOps
 
-from calib.camera_response import CameraResponseError, fit_camera_response, load_reference_card
-from calib.curve_fit import check_dmax_reached, check_monotonic, combine_repeats, fit_curve
+from calib.analysis import FIDUCIAL_ORDER, AnalysisError, analyze, write_diagnostic_plot
+from calib.camera_response import CameraResponseError, load_reference_card
 from calib.lut_format import write_lut
-from calib.lut_solve import LutSolveError, solve_16_exposures
-from calib.perspective import (
-    PerspectiveError,
-    compute_homography,
-    pick_points,
-    sample_patch_mean,
-    sample_point_mean,
-    to_grayscale,
-)
+from calib.perspective import pick_points
 from calib.sidecar import load_sidecar
-
-FIDUCIAL_ORDER = ("TL", "TR", "BL", "BR")
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -55,8 +44,8 @@ def main(argv: list[str] | None = None) -> int:
     args = ap.parse_args(argv)
 
     sidecar = load_sidecar(args.sidecar)
-    photo = np.asarray(Image.open(args.photo).convert("RGB"), dtype=np.float64)
-    gray = to_grayscale(photo)
+    # exif_transpose: phone JPEGs are often stored sideways with an EXIF rotation tag.
+    photo = np.asarray(ImageOps.exif_transpose(Image.open(args.photo)).convert("RGB"), dtype=np.float64)
 
     try:
         card = load_reference_card(args.reference_card, args.reference_card_csv)
@@ -66,100 +55,25 @@ def main(argv: list[str] | None = None) -> int:
 
     print("Click the 4 target fiducials in order: " + ", ".join(FIDUCIAL_ORDER))
     fiducial_photo_px = pick_points(photo / 255.0, 4, "Click fiducials: TL, TR, BL, BR")
-    fiducial_mm = []
-    by_name = {f["name"]: f for f in sidecar["fiducials"]}
-    for name in FIDUCIAL_ORDER:
-        f = by_name[name]
-        fiducial_mm.append((f["x_mm"] + f["size_mm"] / 2, f["y_mm"] + f["size_mm"] / 2))
-
-    try:
-        homography = compute_homography(fiducial_mm, fiducial_photo_px)
-    except PerspectiveError as e:
-        print(f"error: {e}", file=sys.stderr)
-        return 1
-
     print(f"Click the {len(card.labels)} reference-card patches in order: " + ", ".join(card.labels))
     card_points = pick_points(photo / 255.0, len(card.labels), f"Click reference card patches: {', '.join(card.labels)}")
-    card_luma = [sample_point_mean(gray, p) for p in card_points]
 
     try:
-        response_fn = fit_camera_response(card_luma, card)
-    except CameraResponseError as e:
+        result = analyze(photo, sidecar, card, fiducial_photo_px, card_points, args.target_dmax, args.mode)
+    except AnalysisError as e:
         print(f"error: {e}", file=sys.stderr)
         return 1
-
-    exposure_to_densities: dict[float, list[float]] = defaultdict(list)
-    for patch in sidecar["patches"]:
-        try:
-            luma = sample_patch_mean(gray, homography, patch["x_mm"], patch["y_mm"], patch["w_mm"], patch["h_mm"])
-        except PerspectiveError as e:
-            print(f"warning: skipping patch {patch['id']}: {e}", file=sys.stderr)
-            continue
-        density = response_fn(luma)
-        exposure_to_densities[patch["seed_exposure_s"]].append(density)
-
-    levels = combine_repeats(exposure_to_densities)
-    for lv in levels:
-        if lv.low_confidence:
-            print(f"warning: exposure {lv.exposure_s:.3f}s has low confidence "
-                  f"({lv.n_kept}/{lv.n_total} repeats kept)", file=sys.stderr)
-
-    dmax_warning = check_dmax_reached(levels)
-    if dmax_warning:
-        print(f"warning: {dmax_warning}", file=sys.stderr)
-
-    levels, mono_warnings = check_monotonic(levels)
-    for w in mono_warnings:
+    for w in result.warnings:
         print(f"warning: {w}", file=sys.stderr)
 
-    try:
-        curve = fit_curve(levels)
-    except ValueError as e:
-        print(f"error: {e}", file=sys.stderr)
-        return 1
-
-    dmin = levels[0].density
-    exposure_domain = (levels[0].exposure_s, levels[-1].exposure_s)
-    try:
-        exposures, solve_warnings = solve_16_exposures(curve, exposure_domain, dmin, args.target_dmax, args.mode)
-    except LutSolveError as e:
-        print(f"error: {e}", file=sys.stderr)
-        return 1
-    for w in solve_warnings:
-        print(f"warning: {w}", file=sys.stderr)
-
-    write_lut(args.out_lut, exposures)
+    write_lut(args.out_lut, result.exposures)
     print(f"wrote {args.out_lut}")
 
     if args.diagnostic_plot:
-        _write_diagnostic_plot(args.diagnostic_plot, levels, curve, exposures, dmax_warning, mono_warnings)
+        write_diagnostic_plot(args.diagnostic_plot, result)
         print(f"wrote {args.diagnostic_plot}")
 
     return 0
-
-
-def _write_diagnostic_plot(path, levels, curve, exposures, dmax_warning, mono_warnings) -> None:
-    import matplotlib.pyplot as plt
-
-    xs = [lv.exposure_s for lv in levels]
-    ys = [lv.density for lv in levels]
-    fine_x = np.linspace(xs[0], xs[-1], 200)
-    fine_y = [float(curve(x)) for x in fine_x]
-
-    fig, ax = plt.subplots(figsize=(8, 5))
-    ax.plot(xs, ys, "o", label="measured (per exposure level)")
-    ax.plot(fine_x, fine_y, "-", label="fitted curve")
-    ax.plot(exposures, [float(curve(min(max(e, xs[0]), xs[-1]))) for e in exposures], "x", markersize=10, label="chosen 16 LUT points")
-    ax.set_xlabel("exposure (s)")
-    ax.set_ylabel("reflection density")
-    title = "Calibration curve"
-    if dmax_warning or mono_warnings:
-        title += "  [see warnings]"
-    ax.set_title(title)
-    ax.legend()
-    fig.tight_layout()
-    fig.savefig(path, dpi=150)
-    plt.close(fig)
 
 
 if __name__ == "__main__":

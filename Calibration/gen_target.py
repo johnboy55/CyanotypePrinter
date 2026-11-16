@@ -7,7 +7,7 @@ develop it, then hand the sidecar + a photo of the result to analyze_target.py.
 
 Example:
     python gen_target.py --emax 3.0 --mm-per-pixel 2.0 --patches 24 --repeats 2 \\
-        --patch-mm 8 --invert --check-against-cfg ../SDCard/config/uv.cfg \\
+        --patch-mm 4 --invert --check-against-cfg ../SDCard/config/uv.cfg \\
         --out-prefix vandyke_2026-09-04
 """
 from __future__ import annotations
@@ -66,9 +66,9 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--mm-per-pixel", type=float, default=2.0, help="physical pixel pitch in mm (default 2.0, matches uv.cfg)")
     ap.add_argument("--patches", type=int, default=24, dest="n_levels", help="number of distinct exposure levels to sample (default 24)")
     ap.add_argument("--repeats", type=int, default=2, help="repeats per exposure level, spread across the sheet (default 2)")
-    ap.add_argument("--patch-mm", type=float, default=8.0, help="side length of each patch in mm (default 8.0)")
-    ap.add_argument("--fiducial-mm", type=float, default=8.0, help="side length of each corner fiducial in mm (default 8.0)")
-    ap.add_argument("--dmax-swatch-mm", type=float, default=8.0, help="height of the early-DMAX strip at the top of the target (default 8.0)")
+    ap.add_argument("--patch-mm", type=float, default=4.0, help="side length of each patch in mm (default 4.0 = 2x2 pixels)")
+    ap.add_argument("--fiducial-mm", type=float, default=4.0, help="side length of each corner fiducial in mm (default 4.0)")
+    ap.add_argument("--dmax-swatch-mm", type=float, default=4.0, help="height of the early-DMAX strip at the top of the target (default 4.0)")
     ap.add_argument("--cols", type=int, default=None, help="patch columns (default: roughly square grid)")
     ap.add_argument("--invert", dest="invert", action="store_true", default=True, help="assume CFG.invertImage=1 (default, matches uv.cfg)")
     ap.add_argument("--no-invert", dest="invert", action="store_false", help="assume CFG.invertImage=0")

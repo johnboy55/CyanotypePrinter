@@ -102,9 +102,12 @@ def build_target(
     mm_per_pixel: float = 2.0,
     n_levels: int = 24,
     repeats: int = 2,
-    patch_mm: float = 8.0,
-    fiducial_mm: float = 8.0,
-    dmax_swatch_mm: float = 8.0,
+    # 2x2 pixels at the default 2 mm/pixel: the smallest patch whose sampled center
+    # (shrink=0.6 in perspective.sample_patch_mean) stays clear of UV spill from its
+    # neighbours. Print time scales with width x height, so every mm here costs.
+    patch_mm: float = 4.0,
+    fiducial_mm: float = 4.0,
+    dmax_swatch_mm: float = 4.0,
     gap_mm: float = 2.0,
     cols: int | None = None,
     invert: bool = True,

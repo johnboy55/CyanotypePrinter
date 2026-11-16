@@ -50,7 +50,9 @@ def setup(tmp_path):
     sc = json.loads(sidecar_path.read_text())
 
     w_mm, h_mm = layout.width_px * 2.0, layout.height_px * 2.0
-    W, H = int(2 * ORIGIN + w_mm * PX_PER_MM), int(2 * ORIGIN + (h_mm + 30) * PX_PER_MM)
+    # Wide enough for the target or the row of card squares, whichever is wider.
+    card_row_mm = len(CARD_DENSITIES) * 12.0
+    W, H = int(2 * ORIGIN + max(w_mm, card_row_mm) * PX_PER_MM), int(2 * ORIGIN + (h_mm + 30) * PX_PER_MM)
     img = np.full((H, W), luma(true_density(0.0)))
 
     def fill(x_mm, y_mm, ww, hh, value):

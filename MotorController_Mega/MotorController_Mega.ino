@@ -1,3 +1,17 @@
+// Build identity: at boot the OLED and USB serial show the git branch and commit
+// this firmware was built from (e.g. "740798b feat/faster-calibration-..."), so you
+// can confirm what's flashed. The values come from build_info.h, which
+// tools/gen_build_info.sh regenerates on every commit/checkout once a clone has run
+//   git config core.hooksPath .githooks
+// If build_info.h is missing, the banner shows "unknown".
+#if __has_include("build_info.h")
+#include "build_info.h"
+#else
+#define BUILD_GIT_BRANCH "unknown"
+#define BUILD_GIT_COMMIT "unknown"
+#define BUILD_GIT_DATE   ""
+#endif
+
 #include "uv_globals.h"
 #include "uv_sd.h"
 #include "uv_print.h"
@@ -118,6 +132,29 @@ void buzzPrintSuccess() {
   noTone(PIN_ALERT_BUZZER);
 }
 
+// Boot banner: which git commit/branch this firmware came from (see top of file).
+// The branch wraps over two 21-character lines on the 128px OLED.
+static void showBuildBanner() {
+  Serial.print(F("[BUILD] ")); Serial.print(F(BUILD_GIT_COMMIT));
+  Serial.print(' '); Serial.print(F(BUILD_GIT_BRANCH));
+  Serial.print(' '); Serial.println(F(BUILD_GIT_DATE));
+
+  static const char branch[] = BUILD_GIT_BRANCH;
+  char line[22];
+  display.clearBuffer();
+  display.drawStr(0, 0, "Firmware build");
+  display.drawStr(0, 14, BUILD_GIT_COMMIT " " BUILD_GIT_DATE);
+  for (uint8_t row = 0; row < 3; row++) {
+    size_t off = (size_t)row * 21;
+    if (off >= sizeof(branch) - 1) break;
+    strncpy(line, branch + off, 21); line[21] = '\0';
+    display.drawStr(0, 28 + row * 12, line);
+  }
+  display.sendBuffer();
+  delay(2000);
+  display.clearBuffer(); display.sendBuffer();
+}
+
 void setup() {
   Serial.begin(115200);
 
@@ -171,7 +208,7 @@ void setup() {
   // call in the menu code keeps working unchanged instead of landing on the baseline.
   display.setFontPosTop();
   display.setFont(u8g2_font_6x10_tf);
-  display.clearBuffer(); display.sendBuffer();
+  showBuildBanner();
 
   SPI.begin();
   if (SD.begin(PIN_SD_CS)) {

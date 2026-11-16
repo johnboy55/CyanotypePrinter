@@ -37,3 +37,6 @@ desktop.ini
 
 # Wi-Fi credentials for the ESP sketches
 secrets.h
+
+# Generated per build by tools/gen_build_info.sh
+MotorController_Mega/build_info.h

@@ -62,8 +62,10 @@ int printProgressTotal = 0;
 int ledTempC = -1;              // -1 = no reading yet
 unsigned long lastTempMs = 0;   // millis() a TEMP: line last arrived, 0 = never
 String megaInBuf = "";
-unsigned long lastIpBroadcast = 0;
-const unsigned long IP_BROADCAST_MS = 2000;
+const size_t MEGA_LINE_MAX = 64;   // longest protocol line from the Mega is ~30 chars
+bool wifiWasConnected = false;
+unsigned long lastWifiReport = 0;
+const unsigned long WIFI_REPORT_MS = 10000;
 
 // Reply to the LUT-upload handshake (LUTACK / LUTOK:<file> / LUTERR:<why>), captured by
 // handleMegaLine() while sendLutToMega() is waiting on it.
@@ -74,14 +76,18 @@ const char* stateName(PrinterState s) {
   return (s == PS_PRINTING) ? "PRINTING" : "IDLE";
 }
 
+// Answer to the Mega's "IP?" poll. The Mega asks; we never push it unprompted.
 void sendIpToMega() {
   MEGA_SERIAL.print("IP:");
-  MEGA_SERIAL.println(WiFi.localIP());
+  if (WiFi.status() == WL_CONNECTED) MEGA_SERIAL.println(WiFi.localIP());
+  else MEGA_SERIAL.println("connecting");
 }
 
 void handleMegaLine(String line) {
   line.trim();
-  if (line == "STATE:ONLINE" || line == "STATE:OFFLINE") {
+  if (line == "IP?") {
+    sendIpToMega();
+  } else if (line == "STATE:ONLINE" || line == "STATE:OFFLINE") {
     printerState = PS_IDLE;
   } else if (line == "STATE:PRINTING") {
     printerState = PS_PRINTING;
@@ -108,9 +114,9 @@ void pumpMegaSerial() {
     if (c == '\n') {
       handleMegaLine(megaInBuf);
       megaInBuf = "";
-    } else {
+    } else if (megaInBuf.length() < MEGA_LINE_MAX) {
       megaInBuf += c;
-    }
+    }  // else: overlong line (noise) -- drop bytes rather than grow without bound
   }
 }
 
@@ -373,32 +379,80 @@ void handleLutUpload() {
 // --- Setup & Loop ---
 // ============================================================
 
+// Explains a stalled connect on the debug serial: the status code in words, and
+// whether the configured SSID is visible at all (channel, signal, security).
+static void reportWifiFailure() {
+  wl_status_t s = WiFi.status();
+  // Debug output shares the UART with the Mega, so every line starts with '#',
+  // which the Mega ignores.
+  Serial.print("# Wi-Fi not connected, status ");
+  Serial.print((int)s);
+  switch (s) {
+    case WL_NO_SSID_AVAIL:  Serial.println(" (SSID not found)"); break;
+    case WL_CONNECT_FAILED: Serial.println(" (connect failed)"); break;
+#ifdef ESP8266
+    case WL_WRONG_PASSWORD: Serial.println(" (wrong password)"); break;
+#endif
+    case WL_IDLE_STATUS:    Serial.println(" (idle)"); break;
+    case WL_DISCONNECTED:   Serial.println(" (disconnected / still trying)"); break;
+    default:                Serial.println(); break;
+  }
+  int n = WiFi.scanNetworks();
+  Serial.print("# Networks visible: "); Serial.println(n);
+  bool found = false;
+  for (int i = 0; i < n; i++) {
+    bool match = (WiFi.SSID(i) == ssid);
+    found |= match;
+    Serial.print(match ? "# * " : "#   ");
+    Serial.print(WiFi.SSID(i));
+    Serial.print("  ch "); Serial.print(WiFi.channel(i));
+    Serial.print("  "); Serial.print(WiFi.RSSI(i)); Serial.print(" dBm");
+#ifdef ESP8266
+    Serial.print("  enc "); Serial.println(WiFi.encryptionType(i));  // 2=WPA 4=WPA2 7=open 8=auto
+#else
+    Serial.println();
+#endif
+  }
+  if (!found) { Serial.print("# '"); Serial.print(ssid); Serial.println("' is not among them (2.4 GHz only, case-sensitive)."); }
+  WiFi.scanDelete();
+  WiFi.begin(ssid, password);  // scanning drops the attempt; start again
+}
+
 void setup() {
   Serial.begin(115200);         // Debug to PC
   MEGA_SERIAL.begin(MEGA_BAUD);  // UART to Mega
 
-  Serial.print("\n");
-  Serial.println(FW_VARIANT);
-  Serial.print("Connecting to Wi-Fi: ");
-  Serial.println(ssid);
-  WiFi.begin(ssid, password);
-  while (WiFi.status() != WL_CONNECTED) {
-    delay(500);
-    Serial.print(".");
-  }
   Serial.println();
-  Serial.print("Connected. Open Browser to: http://");
-  Serial.println(WiFi.localIP());
+  Serial.print("# "); Serial.println(FW_VARIANT);
+  Serial.print("# Connecting to Wi-Fi: ");
+  Serial.println(ssid);
+#ifdef ESP8266
+  // The router's reason for refusing us -- far more specific than WiFi.status().
+  // Common: 2 auth expired, 15 / 204 4-way handshake timeout (usually wrong password),
+  // 201 no AP found, 202 auth failed, 203 association failed.
+  static WiFiEventHandler onDisc = WiFi.onStationModeDisconnected(
+      [](const WiFiEventStationModeDisconnected &e) {
+        Serial.print("# Wi-Fi disconnect reason ");
+        Serial.println((int)e.reason);
+      });
+#endif
+  // Station only, and don't reuse credentials an older sketch saved to flash.
+  WiFi.persistent(false);
+  WiFi.mode(WIFI_STA);
+  WiFi.disconnect();
+  delay(100);
+  WiFi.begin(ssid, password);
+  // No blocking wait here: loop() logs the connection (or why it isn't happening), and
+  // the Mega's "IP?" polls get "IP:connecting" meanwhile instead of silence.
+  lastWifiReport = millis();
 
   server.on("/", HTTP_GET, handleRoot);
   server.on("/status", HTTP_GET, handleStatus);
   server.on("/lut", HTTP_POST, handleLutUpload);
   server.begin();
-  Serial.println("Web server started.");
+  Serial.println("# Web server started.");
 
-  megaInBuf.reserve(32);
-  sendIpToMega();
-  lastIpBroadcast = millis();
+  megaInBuf.reserve(MEGA_LINE_MAX);
 }
 
 void loop() {
@@ -407,9 +461,17 @@ void loop() {
   // Parse status lines from the Mega (STATE:/PROGRESS:/TEMP:/LUT replies).
   pumpMegaSerial();
 
-  // Keep the Mega's displayed IP fresh, same cadence as the pixel-art sketch.
-  if (millis() - lastIpBroadcast > IP_BROADCAST_MS) {
-    sendIpToMega();
-    lastIpBroadcast = millis();
+  // Connection bookkeeping, debug only: the Mega learns the IP by polling "IP?".
+  bool up = (WiFi.status() == WL_CONNECTED);
+  if (up && !wifiWasConnected) {
+    Serial.print("# Connected. Open Browser to: http://");
+    Serial.println(WiFi.localIP());
+  } else if (!up && wifiWasConnected) {
+    Serial.println("# Wi-Fi lost, reconnecting");
+    lastWifiReport = millis();
+  } else if (!up && millis() - lastWifiReport > WIFI_REPORT_MS) {
+    reportWifiFailure();
+    lastWifiReport = millis();
   }
+  wifiWasConnected = up;
 }

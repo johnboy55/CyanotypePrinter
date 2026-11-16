@@ -160,7 +160,8 @@ extern bool espOnline;
 // responded). Kept globally so the OLED print screen (drawTempReadout) can show the
 // latest value without re-querying the Nano itself.
 extern int lastLedTemp;
-// Last IP address the ESP32/ESP8266 broadcast over ESP_SERIAL ("IP:..."), e.g.
+// Last IP address the ESP32/ESP8266 reported over ESP_SERIAL ("IP:...", the answer to
+// the Mega's "IP?" poll; the OpenSauce sketch still broadcasts it unasked), e.g.
 // "192.168.4.1". Fixed buffer, not a String -- updated from menuMain()'s idle loop and
 // menuESP32Control()'s protocol parser, both of which favor fixed buffers over String on
 // the Mega's small heap. "--" until the first broadcast is seen. Long enough for a full

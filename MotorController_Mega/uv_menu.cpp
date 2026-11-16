@@ -1052,7 +1052,20 @@ void menuESP32Control() {
 
   ESP_SERIAL.println(F("STATE:OFFLINE")); // In case a previous session left the ESP32 thinking it's online.
 
+  // The ESP only reports its IP when asked. Start from the last known answer, ask now,
+  // then every 2 s until it has an address and every 20 s after (DHCP changes).
+  if (lastEspIp[0]) ip = lastEspIp;
+  unsigned long lastIpPoll = 0;
+  bool firstPoll = true;
+
   while (true) {
+    bool haveIp = ip.length() > 0 && ip[0] >= '0' && ip[0] <= '9';
+    if (firstPoll || millis() - lastIpPoll > (haveIp ? 20000UL : 2000UL)) {
+      ESP_SERIAL.println(F("IP?"));
+      lastIpPoll = millis();
+      firstPoll = false;
+    }
+
     // Drain lines from the ESP32: periodic "IP:..." broadcasts, and (while online) a
     // stop-and-wait chunked transfer -- PSTART:w,h,len announces one, then <=32 hex
     // chars at a time as "D:<chunk>", each acked with "OK\n"/"ERR\n" before the sender's
@@ -1164,9 +1177,17 @@ void menuMain() {
   // page's temp reading and Idle state fresh even if nobody ever opens the
   // ESP32 Control menu or starts a print.
   static unsigned long lastEspHeartbeat = 0;
+  static uint8_t heartbeatsSinceIpPoll = 255; // poll on the first heartbeat after boot
   if (millis() - lastEspHeartbeat > 2000) {
     reportLedTempToEsp();
     ESP_SERIAL.println(F("STATE:OFFLINE")); // Idle: main menu implies no print in progress
+    // The ESP only reports its IP when asked ("IP?" -> "IP:<addr>" / "IP:connecting").
+    // Every 2 s until it has one, then every 20 s to notice a DHCP change.
+    bool haveIp = lastEspIp[0] >= '0' && lastEspIp[0] <= '9';
+    if (++heartbeatsSinceIpPoll >= (haveIp ? 10 : 1)) {
+      ESP_SERIAL.println(F("IP?"));
+      heartbeatsSinceIpPoll = 0;
+    }
     lastEspHeartbeat = millis();
   }
 
@@ -1190,23 +1211,28 @@ void menuMain() {
     nanoStatus = F("Offline");
   }
 
-  // Drain the ESP32/ESP8266's periodic "IP:..." broadcasts (and Wi-Fi LUT uploads, which
-  // are only accepted here and in the ESP32 Control menu -- never mid-print or deep in a
-  // submenu, where the ESP just times out and tells the sender to retry) even when
-  // nobody's opened the ESP32 Control menu -- it resends its IP on a timer regardless of Mega menu state, so
-  // without this the bytes would just sit unread in Serial3's RX buffer until someone
-  // finally visits that menu.
+  // Drain lines from the ESP: answers to our "IP?" polls, and Wi-Fi LUT uploads, which
+  // are only accepted here and in the ESP32 Control menu (never mid-print or deep in a
+  // submenu, where the ESP just times out and tells the sender to retry). Lines starting
+  // with '#' are the ESP's debug log and are ignored.
+  //
+  // Fixed buffer, not a String: the ESP's log can run long without a newline (it used
+  // to print a '.' every 500 ms while joining Wi-Fi), and a String growing one byte at a
+  // time ate the Mega's ~3.8 KB of RAM until the menu locked up and the buttons died.
+  static char eBuf[64];
+  static uint8_t eLen = 0;
   while (ESP_SERIAL.available()) {
-    static String eBuf = "";
     char c = ESP_SERIAL.read();
     if (c == '\n') {
-      eBuf.trim();
-      if (eBuf.startsWith(F("IP:"))) setLastEspIp(eBuf.substring(3));
-      else if (handleEspLutLine(eBuf) == 2) showWifiLutLoaded();
-      eBuf = "";
-    } else {
-      eBuf += c;
-    }
+      eBuf[eLen] = '\0';
+      eLen = 0;
+      String line = String(eBuf); line.trim();
+      if (line.length() == 0 || line[0] == '#') continue;
+      if (line.startsWith(F("IP:"))) setLastEspIp(line.substring(3));
+      else if (handleEspLutLine(line) == 2) showWifiLutLoaded();
+    } else if (eLen < sizeof(eBuf) - 1) {
+      eBuf[eLen++] = c;
+    }  // else: overlong line -- drop the rest of it rather than grow
   }
 
   oledHeader(F("Main Menu"));
